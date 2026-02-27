@@ -100,7 +100,7 @@ class HeatpumpControlService(Service):
     @property
     def s2_active(self) -> int:
         o = self.get_item('/S2/0/Active')
-        return o.value or 0 if o else None
+        return (o.value if o else None) or 0
 
     @s2_active.setter
     def s2_active(self, value: int):
@@ -110,12 +110,12 @@ class HeatpumpControlService(Service):
     @property
     def on_hysteresis(self) -> int:
         o = self.get_item('/S2/0/RmSettings/OnHysteresis').value
-        return o.value or 0 if o else None
+        return (o.value if o else None) or self.ON_HYSTERESIS_S
 
     @property
     def off_hysteresis(self) -> int:
         o = self.get_item('/S2/0/RmSettings/OffHysteresis').value
-        return o.value or 0 if o else None
+        return (o.value if o else None) or self.OFF_HYSTERESIS_S
 
     @property
     def power_setting(self) -> int:
@@ -175,14 +175,14 @@ class HeatpumpControlService(Service):
 
     def _on_nominal_total_change(self, val: int):
         if self._estimator:
-            self._estimator.set_nominal_total_w(val)
+            self._estimator.set_nominal_total_w(val, clear_history=True)
             logger.info(f"Nominal power changed to {val} W")
             return True
         return False
 
     def _on_running_thresh_change(self, val: int):
         if self._estimator:
-            self._estimator.set_running_threshold_w(val)
+            self._estimator.set_running_threshold_w(val, clear_history=True)
             logger.info(f"Running threshold changed to {val} W")
             return True
         return False
@@ -229,19 +229,26 @@ class HeatpumpMonitor(Monitor):
             SystemService.servicetype: SystemService
         }, **kwargs)
 
-        self._heatpumps: set[HeatpumpService] = set()
+        self._heatpumps: dict[str, HeatpumpService] = {}
         self._system: SystemService | None = None
         self._control_service: HeatpumpControlService | None = None
 
     @property
     def _heatpump_names(self) -> list[str]:
-        return sorted([hp.name for hp in list(self._heatpumps)])
+        return sorted(self._heatpumps.keys())
 
     @property
     def _heatpump(self) -> HeatpumpService:
-        return list(self._heatpumps)[0]
+        return next(iter(self._heatpumps.values()))
 
     async def _check_lifecycle(self):
+        if self._system is None:
+            logger.info("No system service yet")
+        elif len(self._heatpumps) == 0:
+            logger.info("No heatpump service present")
+        elif len(self._heatpumps) > 1:
+            logger.warning("More than one heatpump service present: %s", ", ".join(self._heatpump_names))
+
         if all((
             self._system is not None,
             len(self._heatpumps) == 1
@@ -263,7 +270,7 @@ class HeatpumpMonitor(Monitor):
 
     async def serviceAdded(self, service: ObservableService):
         if isinstance(service, HeatpumpService):
-            self._heatpumps.add(service)
+            self._heatpumps[service.name] = service
         elif isinstance(service, SystemService):
             if not self._system:
                 self._system = service
@@ -271,7 +278,7 @@ class HeatpumpMonitor(Monitor):
 
     async def serviceRemoved(self, service: ObservableService):
         if isinstance(service, HeatpumpService):
-            self._heatpumps.discard(service)
+            self._heatpumps.pop(service.name, None)
         elif isinstance(service, SystemService):
             self._system = None
         await self._check_lifecycle()
@@ -291,7 +298,7 @@ async def main():
 
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
+        format="%(levelname)s %(message)s",
     )
 
     bus_type = {
@@ -304,7 +311,6 @@ async def main():
 
     try:
         await bus.wait_for_disconnect()
-        logger.info("Terminating")
     except asyncio.CancelledError:
         pass
     finally:
