@@ -16,11 +16,15 @@ from dbus_fast.constants import BusType
 # aiovelib
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'ext', 'aiovelib'))
 
-from aiovelib.service import IntegerItem, Service
+from aiovelib.service import IntegerItem, Service, TextItem
 from aiovelib.client import Monitor, Service as ObservableService
 
+try:
+    from s2 import S2ResourceManagerItem
+    S2_SUPPORT = True
+except:
+    S2_SUPPORT = False
 
-from s2 import S2ResourceManagerItem
 from utils import Power, HeatpumpPowerEstimator as PowerEstimator
 
 logger = logging.getLogger(__name__)
@@ -75,10 +79,12 @@ class SystemService(ObservableService):
 
 class HeatpumpControlService(Service):
 
-    OFF_HYSTERESIS_S: int = 300
-    ON_HYSTERESIS_S:  int = 300
+    OFF_HYSTERESIS_S: int = 600 # 10 min
+    ON_HYSTERESIS_S:  int = 600 # 10 min
     POWER_SETTING_W:  int = 2000
     RUNNING_THRESH_W: int = 200
+
+    RELAY_INDEX: int = 0 # Relay 1
 
     def __init__(self, bus, system_service: SystemService, heatpump_service: HeatpumpService):
         super().__init__(bus=bus, name='com.victronenergy.hpcontrol')
@@ -122,7 +128,9 @@ class HeatpumpControlService(Service):
         return o.value or 0 if o else None
 
     async def register(self):
-        self.add_item(S2ResourceManagerItem('/S2/0/Rm'))
+        if S2_SUPPORT:
+            self.add_item(S2ResourceManagerItem('/S2/0/Rm'))
+
         self.add_item(IntegerItem('/S2/0/Active', 0, text=lambda v: "YES" if v > 0 else "NO"))
         self.add_item(IntegerItem('/S2/0/RmSettings/OffHysteresis', self.OFF_HYSTERESIS_S,
                                   text=lambda v: f"{v:.0f} s"))
@@ -135,6 +143,12 @@ class HeatpumpControlService(Service):
                                   writeable=True, onchange=self._on_running_thresh_change,
                                   text=lambda v: f"{v:.0f} W"))
 
+        self.add_item(IntegerItem('/Relay', self.RELAY_INDEX,
+                                  text=lambda v: "Relay 1" if v == 0 else "Relay 2"))
+        self.add_item(IntegerItem('/State', self._get_relay_state(),
+                                  writeable=True, onchange=self._on_state_change,
+                                  text=lambda v: "ON" if v > 0 else "OFF"))
+        self.add_item(TextItem('/Service', self._heatpump.name))
         self.add_item(IntegerItem('/CurrentPower', None,
                                   text=lambda v: f"{v:.0f} W"))
         self.add_item(IntegerItem('/EstimatedPower', None,
@@ -145,7 +159,9 @@ class HeatpumpControlService(Service):
             phases=self._heatpump.phases,
             running_threshold_w=self.running_threshold
         )
+        self._set_current_power(self._heatpump.power.total)
         self._set_estimated_power()
+
         await super().register()
 
     def _set_current_power(self, val: int):
@@ -171,6 +187,22 @@ class HeatpumpControlService(Service):
             return True
         return False
 
+    def _get_relay_state(self):
+        return self._system.relay_1 if self.RELAY_INDEX == 0 else self._system.relay_2
+
+    def _set_relay_state(self, val: int):
+        if self.RELAY_INDEX == 0:
+            self._system.relay_1 = val
+        else:
+            self._system.relay_2 = val
+        o = self.get_item('/State')
+        o.set_local_value(val)
+
+
+    def _on_state_change(self, val: int):
+        self._set_relay_state(val)
+        return True
+
     def itemsChanged(self, service: ObservableService, values):
         if not self._estimator:
             return
@@ -178,15 +210,16 @@ class HeatpumpControlService(Service):
         if isinstance(service, HeatpumpService):
             if not service.power.valid:
                 return
-
             changed_significantly = self._estimator.feed(service.power)
             if changed_significantly:
                 self._set_estimated_power()
             self._set_current_power(service.power.total)
 
         elif isinstance(service, SystemService):
-            logger.info("%s: relay1=%s relay2=%s ", service.name,
-                        service.relay_1, service.relay_2)
+            if self.RELAY_INDEX == 0:
+                self._set_relay_state(service.relay_1)
+            else:
+                self._set_relay_state(service.relay_2)
 
 
 class HeatpumpMonitor(Monitor):
