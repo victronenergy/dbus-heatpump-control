@@ -1,5 +1,6 @@
 {
     "python.analysis.extraPaths": [
         "./ext/aiovelib"
-    ]
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }
