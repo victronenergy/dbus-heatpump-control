@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import math
 import uuid
 import asyncio
 import logging
@@ -169,6 +170,9 @@ class HeatPumpControlService(Service):
         except Exception as e:
             logger.warning("Failed to publish allowed control types: %s", e)
 
+    def round_up_to_50(self, x: float) -> int:
+        return int(math.ceil(x / 50.0) * 50)
+
     # ---- register ----
 
     async def register(self):
@@ -299,13 +303,15 @@ class HeatPumpControlService(Service):
         if service.power.valid:
             self.items.current_power = service.power.total
 
-            # learn only when OMBC active
             if self.state_on:
-                significant_change = self.est_mgr.feed(service.power)
+                # learn only when state is ON
+                self.est_mgr.feed(service.power)
+
                 now = time.monotonic()
                 diff = now - self._last_estimate_update
-                if significant_change and diff >= self.MAX_EST_UPDATE_S:
-                    self.items.estimated_power = self.est_mgr.estimated_total()
+                if diff >= self.MAX_EST_UPDATE_S:
+                    est = self.est_mgr.estimated_total()
+                    self.items.estimated_power = self.round_up_to_50(est)
                     logging.info(f"Updated estimated power to {self.items.estimated_power} W")
                     update_sysdesc = True
                     self._last_estimate_update = now

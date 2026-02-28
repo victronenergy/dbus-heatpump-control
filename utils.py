@@ -371,11 +371,11 @@ class HeatpumpPowerEstimator:
         quantile_q: float = 0.75,
         alpha: float = 0.05,
         expected_floor_w: float = 300.0,
-        expected_cap_mult: float = 1.5,
+        expected_cap_mult: float | None = None,
 
         # "significant change" thresholds for feed() return value
-        significant_pos_w: float = 25.0,
-        significant_neg_w: float = 150.0,
+        significant_pos_w: float = 20.0,
+        significant_neg_w: float = 60.0,
         significant_rel: float = 0.10,
     ):
         if nominal_total_w <= 0:
@@ -394,8 +394,8 @@ class HeatpumpPowerEstimator:
         self.quantile_q = float(quantile_q)
         self.alpha = float(alpha)
 
-        self.expected_floor_w = float(expected_floor_w)
-        self.expected_cap_mult = float(expected_cap_mult)
+        self.expected_floor_w = expected_floor_w
+        self.expected_cap_mult = expected_cap_mult
 
         self.significant_pos_w = float(significant_pos_w)
         self.significant_neg_w = float(significant_neg_w)
@@ -409,11 +409,12 @@ class HeatpumpPowerEstimator:
             else max(0.25 * self.nominal_total_w, 600.0)
         )
 
-        self._expected_total = _clamp(
-            0.9 * self.nominal_total_w,
-            self.expected_floor_w,
-            self.expected_cap_mult * self.nominal_total_w
-        )
+        new_expected = 0.9 * self.nominal_total_w
+        if self.expected_cap_mult is None:
+            self._expected_total = max(self.expected_floor_w, new_expected)
+        else:
+            cap = self.expected_cap_mult * self.nominal_total_w
+            self._expected_total = _clamp(new_expected, self.expected_floor_w, cap)
 
         self._t = 0.0
         self._last_time: float | None = None
@@ -459,8 +460,12 @@ class HeatpumpPowerEstimator:
         else:
             raise ValueError("mode must be 'auto', 'rescale', 'reanchor', or 'clamp_only'")
 
-        cap = self.expected_cap_mult * self.nominal_total_w
-        self._expected_total = _clamp(self._expected_total, self.expected_floor_w, cap)
+        new_expected = self._expected_total
+        if self.expected_cap_mult is None:
+            self._expected_total = max(self.expected_floor_w, new_expected)
+        else:
+            cap = self.expected_cap_mult * self.nominal_total_w
+            self._expected_total = _clamp(new_expected, self.expected_floor_w, cap)
 
         if clear_history:
             self._run_hist.clear()
@@ -543,8 +548,11 @@ class HeatpumpPowerEstimator:
                 target = _quantile(window_vals, self.quantile_q)
 
                 new_expected = (1.0 - self.alpha) * self._expected_total + self.alpha * target
-                cap = self.expected_cap_mult * self.nominal_total_w
-                self._expected_total = _clamp(new_expected, self.expected_floor_w, cap)
+                if self.expected_cap_mult is None:
+                    self._expected_total = max(self.expected_floor_w, new_expected)
+                else:
+                    cap = self.expected_cap_mult * self.nominal_total_w
+                    self._expected_total = _clamp(new_expected, self.expected_floor_w, cap)
 
         # significant change detection (on expected_total)
         changed = self._significant_change(self._expected_total)
@@ -581,9 +589,13 @@ class HeatpumpPowerEstimator:
             new.running_threshold_w = max(0.25 * new.nominal_total_w, 600.0)
 
         if keep_expected:
-            cap = new.expected_cap_mult * new.nominal_total_w
-            new._expected_total = _clamp(self._expected_total, new.expected_floor_w, cap)
-            new._last_reported_expected_total = new._expected_total
+
+            new_expected = self._expected_total
+            if self.expected_cap_mult is None:
+                self._expected_total = max(self.expected_floor_w, new_expected)
+            else:
+                cap = self.expected_cap_mult * self.nominal_total_w
+                self._expected_total = _clamp(new_expected, self.expected_floor_w, cap)
 
         return new
 

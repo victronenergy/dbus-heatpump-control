@@ -11,7 +11,7 @@ With --interactive / -i:
   Manual CLI control:
     - on / off
     - set <watts>
-    - spike <0-10>
+    - spike <0-100>
     - status
     - help
     - quit
@@ -52,7 +52,7 @@ class HeatpumpTestService(Service):
     PERIOD_S = ON_S + OFF_S
 
     DEFAULT_NOMINAL_W = 2000.0
-    DEFAULT_SPIKINESS = 4          # 0..10
+    DEFAULT_SPIKINESS = 4          # 0..100
     UPDATE_DT = 1.0
 
     def __init__(
@@ -79,7 +79,7 @@ class HeatpumpTestService(Service):
         # interactive controls
         self._forced_on = False
         self._nominal_w = float(nominal_w)
-        self._spikiness = int(_clamp(float(spikiness), 0.0, 10.0))
+        self._spikiness = int(_clamp(float(spikiness), 0.0, 100.0))
 
         self._lock = asyncio.Lock()
 
@@ -100,8 +100,8 @@ class HeatpumpTestService(Service):
 
     async def set_spikiness(self, spikiness: int) -> None:
         s = int(spikiness)
-        if s < 0 or s > 10:
-            raise ValueError("spikiness must be 0..10")
+        if s < 0 or s > 100:
+            raise ValueError("spikiness must be 0..100")
         async with self._lock:
             self._spikiness = s
 
@@ -258,7 +258,7 @@ class HeatpumpTestService(Service):
 
     async def interactive_cli(self):
         print("Interactive mode.")
-        print("Commands: on | off | set <watts> | spike <0-10> | status | help | quit")
+        print("Commands: on | off | set <watts> | spike <0-100> | status | help | quit")
 
         loop = asyncio.get_running_loop()
 
@@ -290,7 +290,7 @@ class HeatpumpTestService(Service):
 
                 elif cmd in ("spike", "spikiness"):
                     if len(parts) != 2:
-                        print("Usage: spike <0-10>")
+                        print("Usage: spike <0-100>")
                         continue
                     s = int(parts[1])
                     await self.set_spikiness(s)
@@ -309,7 +309,7 @@ class HeatpumpTestService(Service):
                     print("  on             - force heatpump on")
                     print("  off            - force heatpump off")
                     print("  set <watts>    - set nominal power (W)")
-                    print("  spike <0-10>   - set spikiness (noise amplitude)")
+                    print("  spike <0-100>  - set spikiness (noise amplitude)")
                     print("  status         - show current state")
                     print("  quit / exit    - terminate")
 
