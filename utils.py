@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import time
+import logging
 from enum import IntEnum
 from dataclasses import dataclass
 from collections import deque
-from typing import Callable, Deque, Optional, Tuple
+from typing import Callable, Deque, Tuple
 
 from aiovelib.client import Service as ObservableService
 from aiovelib.service import IntegerItem
+from aiovelib.localsettings import Setting, SettingsService as ObservableSettingsService, SETTINGS_SERVICE
+
+
+logger = logging.getLogger()
 
 
 class SafeIntEnum(IntEnum):
@@ -68,15 +73,25 @@ class SystemService(ObservableService):
     ]
 
 
-class SettingsService(ObservableService):
-    servicetype = "com.victronenergy.settings"
-    paths = [
+class SettingsService(ObservableSettingsService):
+    servicetype = SETTINGS_SERVICE
+    paths = {
         "/Settings/Relay/Function",
         "/Settings/Relay/Polarity",
         "/Settings/Relay/1/Function",
-        "/Settings/Relay/1/Polarity"
-    ]
+        "/Settings/Relay/1/Polarity",
+    }
 
+    async def add_rm_settings(self,
+                              ON_HYSTERESIS_S: int, OFF_HYSTERESIS_S: int,
+                              POWER_SETTING_W: int, RUNNING_THRESH_W: int):
+        await self.add_settings(
+            Setting("/Settings/HeatpumpControl/OnHysteresis", ON_HYSTERESIS_S, _min=600),
+			Setting("/Settings/HeatpumpControl/OffHysteresis", OFF_HYSTERESIS_S, _min=600),
+            Setting("/Settings/HeatpumpControl/PowerSetting", POWER_SETTING_W, _min=0),
+            Setting("/Settings/HeatpumpControl/RunningThreshold", RUNNING_THRESH_W, _min=0),
+            Setting("/Settings/HeatpumpControl/EstimatedPower", POWER_SETTING_W, _min=0)
+		)
 
 @dataclass(frozen=True, slots=True)
 class Power:
@@ -135,38 +150,38 @@ class RelayChannel:
 
     # ---- DBus paths ----
 
-    def _state_path(self) -> str:
+    def state_path(self) -> str:
         return f"/Relay/{self.index}/State"
 
-    def _function_path(self) -> str:
+    def function_path(self) -> str:
         # relay0 uses /Settings/Relay/*, relay1 uses /Settings/Relay/1/*
         return "/Settings/Relay/Function" if self.index == 0 else f"/Settings/Relay/{self.index}/Function"
 
-    def _polarity_path(self) -> str:
+    def polarity_path(self) -> str:
         return "/Settings/Relay/Polarity" if self.index == 0 else f"/Settings/Relay/{self.index}/Polarity"
 
     # ---- tidy IO helpers ----
 
     def _read_state_raw(self) -> int | None:
-        v = self._system.get_value(self._state_path())
+        v = self._system.get_value(self.state_path())
         return None if v is None else int(v)
 
     async def _write_state_raw(self, raw: int) -> None:
-        await self._system.set_value(self._state_path(), int(raw))
+        await self._system.set_value(self.state_path(), int(raw))
 
     def _read_function(self) -> int | None:
-        v = self._settings.get_value(self._function_path())
+        v = self._settings.get_value(self.function_path())
         return None if v is None else int(v)
 
     async def _write_function(self, raw: int) -> None:
-        await self._settings.set_value(self._function_path(), int(raw))
+        await self._settings.set_value(self.function_path(), int(raw))
 
     def _read_polarity(self) -> int | None:
-        v = self._settings.get_value(self._polarity_path())
+        v = self._settings.get_value(self.polarity_path())
         return None if v is None else int(v)
 
     async def _write_polarity(self, raw: int) -> None:
-        await self._settings.set_value(self._polarity_path(), int(raw))
+        await self._settings.set_value(self.polarity_path(), int(raw))
 
     # ---- public raw access ----
 
@@ -228,17 +243,9 @@ class Relays:
 
 
 class HpItems:
-    def __init__(self, svc,
-                 ON_HYSTERESIS_S: int,
-                 OFF_HYSTERESIS_S: int,
-                 POWER_SETTING_W: int,
-                 RUNNING_THRESH_W: int):
+    def __init__(self, svc, settings: SettingsService):
         self.svc = svc
-
-        self.ON_HYSTERESIS_S = ON_HYSTERESIS_S
-        self.OFF_HYSTERESIS_S = OFF_HYSTERESIS_S
-        self.POWER_SETTING_W = POWER_SETTING_W
-        self.RUNNING_THRESH_W = RUNNING_THRESH_W
+        self.settings = settings
 
     def get_int(self, path: str, default: int) -> int:
         it = self.svc.get_item(path)
@@ -248,6 +255,12 @@ class HpItems:
         it = self.svc.get_item(path)
         if it:
             it.set_local_value(value)
+
+    def get_setting(self, path: str) -> int:
+        return self.settings.get_value(path)
+
+    def set_setting(self, path: str, val: int):
+        self.settings.set_value_async(path, val)
 
     @property
     def s2_active(self) -> int:
@@ -259,38 +272,56 @@ class HpItems:
 
     @property
     def on_hysteresis(self) -> int:
-        return self.get_int("/S2/0/RmSettings/OnHysteresis", self.ON_HYSTERESIS_S)
+        return self.get_setting("/Settings/HeatpumpControl/OnHysteresis")
+
+    @on_hysteresis.setter
+    def on_hysteresis(self, val: int):
+        self.set_setting("/Settings/HeatpumpControl/OnHysteresis", val)
+        self.set_local("/S2/0/RmSettings/OnHysteresis", val)
 
     @property
     def off_hysteresis(self) -> int:
-        return self.get_int("/S2/0/RmSettings/OffHysteresis", self.OFF_HYSTERESIS_S)
+        return self.get_setting("/Settings/HeatpumpControl/OffHysteresis")
+
+    @off_hysteresis.setter
+    def off_hysteresis(self, val: int):
+        self.set_setting("/Settings/HeatpumpControl/OffHysteresis", val)
+        self.set_local("/S2/0/RmSettings/OffHysteresis", val)
 
     @property
     def power_setting(self) -> int:
-        return self.get_int("/S2/0/RmSettings/PowerSetting", self.POWER_SETTING_W)
+        return self.get_setting("/Settings/HeatpumpControl/PowerSetting")
+
+    @power_setting.setter
+    def power_setting(self, val: int):
+        self.set_setting("/Settings/HeatpumpControl/PowerSetting", val)
+        self.set_local("/S2/0/RmSettings/PowerSetting", val)
 
     @property
     def running_threshold(self) -> int:
-        return self.get_int("/S2/0/RmSettings/RunningThreshold", self.RUNNING_THRESH_W)
+        return self.get_setting("/Settings/HeatpumpControl/RunningThreshold")
+
+    @running_threshold.setter
+    def running_threshold(self, val: int):
+        self.set_setting("/Settings/HeatpumpControl/RunningThreshold", val)
+        self.set_local("/S2/0/RmSettings/RunningThreshold", val)
 
     @property
     def current_power(self) -> int | None:
-        it = self.svc.get_item("/CurrentPower")
+        it = self.svc.get_item("/Ac/Power")
         return int(it.value) if it and it.value is not None else None
 
     @current_power.setter
     def current_power(self, v: int | None):
-        self.set_local("/CurrentPower", v)
+        self.set_local("/Ac/Power", v)
 
     @property
     def estimated_power(self) -> int:
-        it = self.svc.get_item("/EstimatedPower")
-        if it and it.value is not None:
-            return int(it.value)
-        return int(self.power_setting)
+        return self.get_setting("/Settings/HeatpumpControl/EstimatedPower")
 
     @estimated_power.setter
     def estimated_power(self, v: int):
+        self.set_setting("/Settings/HeatpumpControl/EstimatedPower", int(v))
         self.set_local("/EstimatedPower", int(v))
 
     @property
@@ -299,7 +330,7 @@ class HpItems:
         return SERVICE_STATE(i)
 
     @state.setter
-    def state(self, v: int):
+    def state(self, v: int) :
         i = SERVICE_STATE.NOT_AVAILABLE
         if self.svc._relay_function_ok():
             i = SERVICE_STATE(v)
@@ -374,8 +405,7 @@ class HeatpumpPowerEstimator:
         expected_cap_mult: float | None = None,
 
         # "significant change" thresholds for feed() return value
-        significant_pos_w: float = 20.0,
-        significant_neg_w: float = 60.0,
+        significant_abs_w: float = 25.0,
         significant_rel: float = 0.10,
     ):
         if nominal_total_w <= 0:
@@ -397,8 +427,7 @@ class HeatpumpPowerEstimator:
         self.expected_floor_w = expected_floor_w
         self.expected_cap_mult = expected_cap_mult
 
-        self.significant_pos_w = float(significant_pos_w)
-        self.significant_neg_w = float(significant_neg_w)
+        self.significant_abs_w = float(significant_abs_w)
         self.significant_rel = float(significant_rel)
 
         # Track whether threshold was auto-derived so we can keep it consistent on nominal changes
@@ -409,7 +438,7 @@ class HeatpumpPowerEstimator:
             else max(0.25 * self.nominal_total_w, 600.0)
         )
 
-        new_expected = 0.9 * self.nominal_total_w
+        new_expected = self.nominal_total_w
         if self.expected_cap_mult is None:
             self._expected_total = max(self.expected_floor_w, new_expected)
         else:
@@ -446,7 +475,7 @@ class HeatpumpPowerEstimator:
         if not self._running_threshold_w_explicit:
             self.running_threshold_w = max(0.25 * self.nominal_total_w, 600.0)
 
-        learned = (len(self._run_hist) >= 20)  # same threshold you use to update expected
+        learned = (len(self._run_hist) >= 20)
 
         if mode == "auto":
             mode = "rescale" if learned else "reanchor"
@@ -454,7 +483,7 @@ class HeatpumpPowerEstimator:
         if mode == "rescale":
             self._expected_total *= (new_nom / old_nom) if old_nom > 0 else 1.0
         elif mode == "reanchor":
-            self._expected_total = 0.9 * new_nom
+            self._expected_total = new_nom
         elif mode == "clamp_only":
             pass
         else:
@@ -567,7 +596,7 @@ class HeatpumpPowerEstimator:
 
         keep_expected:
         - True: carry over current expected total (clamped to new nominal/cap)
-        - False: re-anchor to 0.9 * nominal (default constructor behavior)
+        - False: re-anchor to nominal (default constructor behavior)
         """
         new = HeatpumpPowerEstimator(
             nominal_total_w=self.nominal_total_w,
@@ -578,8 +607,7 @@ class HeatpumpPowerEstimator:
             alpha=self.alpha,
             expected_floor_w=self.expected_floor_w,
             expected_cap_mult=self.expected_cap_mult,
-            significant_pos_w=self.significant_pos_w,
-            significant_neg_w=self.significant_neg_w,
+            significant_abs_w=self.significant_abs_w,
             significant_rel=self.significant_rel,
         )
 
@@ -641,7 +669,7 @@ class HeatpumpPowerEstimator:
             return True
         delta = new_expected - old
 
-        if delta > self.significant_pos_w or abs(delta) > self.significant_neg_w:
+        if abs(delta) >= self.significant_abs_w:
             return True
         # relative check against the larger of old/floor to avoid noisy % at low power
         denom = max(abs(old), self.expected_floor_w, 1.0)

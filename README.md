@@ -2,9 +2,9 @@
 
 `com.victronenergy.heatpumpcontrol`
 
-A Venus OS service that enables **SG-Ready control of heatpumps** using:
+A Venus OS service that enables **SG-Ready control** for heat pumps, boilers and similar appliances using:
 
-- The GX device internal relay
+- A GX device internal relay
 - A Victron VM-3P75CT energy meter (for monitoring heatpump power consumption)
 - Integration into [venus-opportunity-loads](https://github.com/victronenergy/venus-opportunity-loads) via S2 over D-Bus
 

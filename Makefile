@@ -2,13 +2,13 @@ FILES =									\
 	dbus-heatpump-control.py			\
 	utils.py							\
 	s2.py								\
+	version.py							\
 
 AIOVELIB =								\
 	__init__.py							\
 	service.py							\
 	client.py							\
 	localsettings.py					\
-	vreglink.py							\
 	s2.py								\
 
 all:

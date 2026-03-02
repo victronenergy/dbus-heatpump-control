@@ -483,6 +483,7 @@ class HeatpumpOMBC(OMBCControlType):
         self._id_off_on = uuid.uuid4()
 
         self._pm_task: asyncio.Task | None = None
+        self._apply_task: asyncio.Task | None = None
 
         super().__init__()
 
@@ -555,8 +556,7 @@ class HeatpumpOMBC(OMBCControlType):
             timers=[on_timer, off_timer],
         )
 
-    async def handle_instruction(self, conn, msg, send_okay):
-
+    async def handle_instruction(self, conn, msg, send_okay: Awaitable[None]):
         if not isinstance(msg, OMBCInstruction):
             return
         if not self._active:
@@ -566,20 +566,34 @@ class HeatpumpOMBC(OMBCControlType):
             logger.warning("Unknown operation mode id: %s", msg.operation_mode_id)
             return
 
+        # cancel a previous task if, if still not done
+        prev = self._apply_task
+        if prev is not None:
+            if not prev.done():
+                prev.cancel()
+            try:
+                await prev
+            except asyncio.CancelledError:
+                pass
+
         # respect execution_time if present
         delay = 0.0
         if msg.execution_time is not None:
             delay = max(0.0, (msg.execution_time - datetime.now(timezone.utc)).total_seconds())
 
-        asyncio.create_task(self._apply_mode(msg.operation_mode_id, delay))
+        self._apply_task = asyncio.create_task(self._apply_mode(msg.operation_mode_id, delay))
         await send_okay
 
     async def _apply_mode(self, op_mode_id: str, delay: float):
-        if delay:
-            await asyncio.sleep(delay)
+        try:
+            if delay:
+                await asyncio.sleep(delay)
 
-        on = (op_mode_id == str(self._id_on))
-        await self._ctrl._set_relay_on(on)
+            on = (str(op_mode_id) == str(self._id_on))
+            await self._ctrl._set_relay_on(on)
+        except asyncio.CancelledError:
+            logger.warning("Apply mode task for mode id %s got cancelled", op_mode_id)
+            pass
 
     async def activate(self, conn):
         self._active = True

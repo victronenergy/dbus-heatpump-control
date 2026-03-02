@@ -24,6 +24,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'ext', 'aiovelib'))
 from aiovelib.service import IntegerItem, Service, TextItem
 from aiovelib.client import Monitor, Service as ObservableService
 
+from version import VERSION
 from s2 import (
     S2Adapter,
     S2ResourceManagerItem,
@@ -35,7 +36,7 @@ from utils import (
     SERVICE_STATE,
     EnumItem,
     EstimatorManager,
-    SafeIntEnum,
+    RelayChannel,
     SettingsService,
     SystemService,
     HeatpumpService,
@@ -50,9 +51,11 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 
+SERVICE_NAME = "com.victronenergy.heatpumpcontrol"
+
 class HeatPumpControlService(Service):
 
-    productname = "Heatpump control"
+    productname = "Heat pump control"
 
     OFF_HYSTERESIS_S: int = 600
     ON_HYSTERESIS_S: int = 600
@@ -68,14 +71,13 @@ class HeatPumpControlService(Service):
                  system_service: SystemService,
                  settings_service: SettingsService,
                  heatpump_service: HeatpumpService):
-        super().__init__(bus=bus, name="com.victronenergy.heatpumpcontrol")
+        super().__init__(bus=bus, name=SERVICE_NAME)
 
         self._system: SystemService = system_service
         self._settings: SettingsService = settings_service
         self._heatpump: HeatpumpService = heatpump_service
 
-        self.items = HpItems(self, self.ON_HYSTERESIS_S, self.OFF_HYSTERESIS_S,
-                             self.POWER_SETTING_W, self.RUNNING_THRESH_W)
+        self.items = HpItems(self, self._settings)
         self.relays = Relays(self._system, self._settings, count=2,
                              cfg=RelayConfig(required_function=self.REQUIRED_RELAY_FUNCTION))
 
@@ -86,6 +88,7 @@ class HeatPumpControlService(Service):
         self._noctrl = None
         self.s2: S2Adapter | None = None
 
+        self._prev_relay_state_change: float | None = None
         self._last_estimate_update: float | None = time.monotonic()
 
     # ---- small domain properties used by OMBC / adapter ----
@@ -108,11 +111,29 @@ class HeatPumpControlService(Service):
     def state_on(self) -> bool:
         return bool(self.items.state == SERVICE_STATE.ON)
 
+    @property
+    def relay(self) -> RelayChannel:
+        return self.relays[self.RELAY_INDEX]
+
     # ---- relay control (logical state) ----
 
     async def _set_relay_on(self, on: bool) -> None:
         try:
-            await self.relays[self.RELAY_INDEX].set_state(RELAY_STATE.ON if on else RELAY_STATE.OFF)
+
+            # Warn if command violates hystereses
+            prev_on: bool = self.relay.state == RELAY_STATE.ON
+            if prev_on != on:
+                logger.debug(f"Switching relay to { 'ON' if on else 'OFF' }")
+                prev_ts = self._prev_relay_state_change
+                if prev_ts:
+                    diff = time.monotonic() - prev_ts
+                    if on and diff < self.items.on_hysteresis:
+                        logger.warning(f"Switching ON, but was switched off only { int(diff) } s ago")
+                    elif not on and diff < self.items.off_hysteresis:
+                        logger.warning(f"Switching OFF, but was switched on only { int(diff) } s ago")
+                self._prev_relay_state_change = time.monotonic()
+
+            await self.relay.set_state(RELAY_STATE.ON if on else RELAY_STATE.OFF)
         except Exception as e:
             logger.exception("Relay control failed: %s", e)
             await self._publish_allowed_control_types()
@@ -120,14 +141,14 @@ class HeatPumpControlService(Service):
             self._refresh_relay_state_from_services()
 
     def _refresh_relay_state_from_services(self) -> None:
-        st = self.relays[self.RELAY_INDEX].state
+        st = self.relay.state
         if st is None:
             return
-        self.items.state = 1 if st == RELAY_STATE.ON else 0
+        self.items.state = SERVICE_STATE.ON if st == RELAY_STATE.ON else SERVICE_STATE.OFF
 
     def _relay_function_ok(self) -> bool:
         try:
-            return self.relays[self.RELAY_INDEX].controllable
+            return self.relay.controllable
         except Exception:
             return False
 
@@ -179,13 +200,17 @@ class HeatPumpControlService(Service):
         if self._relay_function_ok():
             await self._set_relay_on(False)
 
+        # Create settings with defaults, if missing
+        await self._settings.add_rm_settings(
+            self.ON_HYSTERESIS_S, self.OFF_HYSTERESIS_S, self.POWER_SETTING_W, self.RUNNING_THRESH_W)
+
         # S2 RM
         details = AssetDetails(
             resource_id=uuid.uuid4(),
             provides_forecast=False,
             provides_power_measurements=[phases_to_commodity(self._heatpump.phases)],
-            instruction_processing_delay=Duration(0),
-            roles=[Role(role=RoleType.ENERGY_CONSUMER, commodity="ELECTRICITY")],
+            instruction_processing_delay=Duration.from_milliseconds(0),
+            roles=[Role(role=RoleType.ENERGY_CONSUMER, commodity=Commodity.ELECTRICITY)],
             name=self.productname,
             manufacturer="Victron Energy",
             firmware_version="1",
@@ -206,16 +231,16 @@ class HeatPumpControlService(Service):
 
         # UI items
         self.add_item(IntegerItem("/S2/0/Active", 0, text=lambda v: "YES" if v > 0 else "NO"))
-        self.add_item(IntegerItem("/S2/0/RmSettings/OffHysteresis", self.OFF_HYSTERESIS_S,
+        self.add_item(IntegerItem("/S2/0/RmSettings/OffHysteresis", self.items.off_hysteresis,
                                   writeable=True, onchange=self._on_off_hysteresis_change,
                                   text=lambda v: f"{v:.0f} s"))
-        self.add_item(IntegerItem("/S2/0/RmSettings/OnHysteresis", self.ON_HYSTERESIS_S,
+        self.add_item(IntegerItem("/S2/0/RmSettings/OnHysteresis", self.items.on_hysteresis,
                                   writeable=True, onchange=self._on_on_hysteresis_change,
                                   text=lambda v: f"{v:.0f} s"))
-        self.add_item(IntegerItem("/S2/0/RmSettings/PowerSetting", self.POWER_SETTING_W,
-                                  writeable=True, onchange=self._on_nominal_total_change,
+        self.add_item(IntegerItem("/S2/0/RmSettings/PowerSetting", self.items.power_setting,
+                                  writeable=True, onchange=self._on_power_setting_change,
                                   text=lambda v: f"{v:.0f} W"))
-        self.add_item(IntegerItem("/S2/0/RmSettings/RunningThreshold", self.RUNNING_THRESH_W,
+        self.add_item(IntegerItem("/S2/0/RmSettings/RunningThreshold", self.items.running_threshold,
                                   writeable=True, onchange=self._on_running_thresh_change,
                                   text=lambda v: f"{v:.0f} W"))
 
@@ -225,7 +250,7 @@ class HeatPumpControlService(Service):
         self.add_item(EnumItem("/State", SERVICE_STATE, value=SERVICE_STATE(self.items.state)))
 
         self.add_item(TextItem("/Service", self._heatpump.name))
-        self.add_item(IntegerItem("/CurrentPower", None, text=lambda v: f"{v:.0f} W" if v is not None else "--"))
+        self.add_item(IntegerItem("/Ac/Power", None, text=lambda v: f"{v:.0f} W" if v is not None else "--"))
         self.add_item(IntegerItem("/EstimatedPower", None, text=lambda v: f"{v:.0f} W" if v is not None else "--"))
 
         self.add_item(IntegerItem("/DeviceInstance", 0))
@@ -234,7 +259,7 @@ class HeatPumpControlService(Service):
         # init estimator
         phases = self._heatpump.phases
         phases = int(phases) if phases in (1, 3) else None
-        self.est_mgr.init(nominal_w=self.items.power_setting, phases=phases, running_thr=self.items.running_threshold)
+        self.est_mgr.init(nominal_w=self.items.estimated_power, phases=phases, running_thr=self.items.running_threshold)
 
         # init current + estimated
         self.items.current_power = self._heatpump.power.total
@@ -243,7 +268,12 @@ class HeatPumpControlService(Service):
         # adapter
         self.s2 = S2Adapter(ctrl=self, rm_item=self._rm_item, ombc=self._ombc, noctrl=self._noctrl)
 
+        # bring things up to date before registering
         self._refresh_relay_state_from_services()
+        has_obmc = self._ombc in self.rm_item.control_types
+        if has_obmc != self._is_ombc_allowed():
+            await self._publish_allowed_control_types()
+
         await super().register()
 
         try:
@@ -254,34 +284,33 @@ class HeatPumpControlService(Service):
     # ---- onchange callbacks ----
 
     def _on_off_hysteresis_change(self, val: int):
+        self.items.off_hysteresis = val
         if self.s2:
             self.s2.request_system_description()
+        logger.info("Off hysteresis changed to %s s", val)
         return True
 
     def _on_on_hysteresis_change(self, val: int):
+        self.items.on_hysteresis = val
         if self.s2:
             self.s2.request_system_description()
+        logger.info("On hysteresis changed to %s s", val)
         return True
 
-    def _on_nominal_total_change(self, val: int):
+    def _on_power_setting_change(self, val: int):
+        self.items.power_setting = val
         self.est_mgr.set_nominal(int(val), mode="auto", clear_history=True)
         self.items.estimated_power = self.est_mgr.estimated_total()
         if self.s2:
             self.s2.request_system_description()
-        logger.info("Nominal power changed to %s W", val)
+        logger.info("Power setting changed to %s W, estimator got reset", val)
         return True
 
     def _on_running_thresh_change(self, val: int):
+        self.items.running_threshold = val
         self.est_mgr.set_running_threshold(int(val), clear_history=True)
         logger.info("Running threshold changed to %s W", val)
         return True
-
-    def _function_path_for(self, relay_index: int) -> str:
-        return "/Settings/Relay/Function" if relay_index == 0 else f"/Settings/Relay/{relay_index}/Function"
-
-    def _polarity_path_for(self, relay_index: int) -> str:
-        return "/Settings/Relay/Polarity" if relay_index == 0 else f"/Settings/Relay/{relay_index}/Polarity"
-
 
     # ---- itemsChanged routing ----
 
@@ -305,14 +334,15 @@ class HeatPumpControlService(Service):
 
             if self.state_on:
                 # learn only when state is ON
-                self.est_mgr.feed(service.power)
+                changed_significantly = self.est_mgr.feed(service.power)
 
                 now = time.monotonic()
                 diff = now - self._last_estimate_update
-                if diff >= self.MAX_EST_UPDATE_S:
+                if changed_significantly and diff >= self.MAX_EST_UPDATE_S:
                     est = self.est_mgr.estimated_total()
-                    self.items.estimated_power = self.round_up_to_50(est)
-                    logging.info(f"Updated estimated power to {self.items.estimated_power} W")
+                    est_rounded = self.round_up_to_50(est)
+                    self.items.estimated_power = est_rounded
+                    logging.info(f"Updated estimated power to {est_rounded} W")
                     update_sysdesc = True
                     self._last_estimate_update = now
 
@@ -332,7 +362,9 @@ class HeatPumpControlService(Service):
 
     def _on_system_changed(self, service: SystemService, values: dict):
         # reflect state changes
-        if f"/Relay/{self.RELAY_INDEX}/State" in values:
+        st_path = self.relay.state_path()
+
+        if st_path in values:
             self._refresh_relay_state_from_services()
 
         # status updates only relevant for OMBC
@@ -341,8 +373,9 @@ class HeatPumpControlService(Service):
 
     def _on_settings_changed(self, service: SettingsService, values: dict):
         # if polarity changed for our relay, update displayed state immediately
-        fn_path = self._function_path_for(self.RELAY_INDEX)
-        pol_path = self._polarity_path_for(self.RELAY_INDEX)
+
+        fn_path = self.relay.function_path()
+        pol_path = self.relay.polarity_path()
 
         if fn_path in values or pol_path in values:
             self._refresh_relay_state_from_services()
@@ -442,7 +475,7 @@ async def main():
         format="%(levelname)s %(message)s",
     )
 
-    logger.info(f"*** dbus-heatpump-control ***")
+    logger.info(f"*** dbus-heatpump-control {VERSION} ***")
 
     bus_type = {
         "system": BusType.SYSTEM,
