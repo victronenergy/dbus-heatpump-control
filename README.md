@@ -1,10 +1,10 @@
-# Venus OS Heatpump Control Service
+# Venus OS Heat Pump Control Service
 
 `com.victronenergy.heatpumpcontrol`
 
 A Venus OS service that enables **SG-Ready control** for heat pumps, boilers and similar appliances using:
 
-- A GX device internal relay
+- GX device internal relay 2
 - A Victron VM-3P75CT energy meter (for monitoring heatpump power consumption)
 - Integration into [venus-opportunity-loads](https://github.com/victronenergy/venus-opportunity-loads) via S2 over D-Bus
 
@@ -14,7 +14,7 @@ This allows the heat pump to be integrated into energy management via its [SG-Re
 
 **SG-Ready (Smart Grid Ready)** is a standardized control interface used by many modern heat pumps to allow external management systems to influence their operation. It uses two digital inputs to select between defined operating modes. These modes enable grid- or energy-aware behavior, such as reducing consumption, running normally, or increasing consumption when surplus energy is available.
 
-**Operating State 3** (often referred to as "Boost" or "Recommended ON") signals the heat pump to actively run and make use of available surplus energy — for example, from photovoltaic production. In this mode, the heat pump may increase compressor activity or prioritize heating/storage in order to absorb excess energy. Within this service, the GX device’s internal relay is used to activate the SG-Ready input corresponding to Operating Mode 3, allowing the heat pump to participate in smart energy management while still maintaining its internal safety and temperature controls.
+**Operating State 3** (often referred to as "Boost" or "Recommended ON") signals the heat pump to actively run and make use of available surplus energy — for example, from photovoltaic production. In this mode, the heat pump may increase compressor activity or prioritize heating/storage in order to absorb excess energy. Within this service, the GX device’s internal Relay 2 is used to activate the SG-Ready input corresponding to Operating Mode 3, allowing the heat pump to participate in smart energy management while still maintaining its internal safety and temperature controls.
 
 While the interface offers only limited control capabilities, its widespread integration across many heat pumps and its inherent simplicity position it well for broad market adoption.
 
@@ -26,8 +26,8 @@ While the interface offers only limited control capabilities, its widespread int
   - Correct configuration of number and phase assignment is required
 
 - GX Device
-  - GX relay NO/COM terminals wired to SG-Ready input for "Boost" state of the heat pump
-  - GX Relay configured to function `6`
+  - GX Relay 2 NO/COM terminals wired to SG-Ready input for "Boost" state of the heat pump
+  - GX Relay 2 configured to function `6`
   - "Opportunity Loads" installed and enabled
 
 ## Working principle

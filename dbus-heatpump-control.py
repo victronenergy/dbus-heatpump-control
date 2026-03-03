@@ -62,16 +62,18 @@ class HeatPumpControlService(Service):
     POWER_SETTING_W: int = 2000
     RUNNING_THRESH_W: int = 200
 
-    RELAY_INDEX: int = 0  # 0-based
+    DEFAULT_RELAY_INDEX: int = 1  # default, 0-based
     REQUIRED_RELAY_FUNCTION: int = 6 # Opportunity Loads
 
     MAX_EST_UPDATE_S: int = 30  # wait at least 30s between power estimate updates
 
-    def __init__(self, bus,
+    def __init__(self, bus, relay_index: int | None,
                  system_service: SystemService,
                  settings_service: SettingsService,
                  heatpump_service: HeatpumpService):
         super().__init__(bus=bus, name=SERVICE_NAME)
+
+        self._relay_index = relay_index if relay_index is not None else self.DEFAULT_RELAY_INDEX
 
         self._system: SystemService = system_service
         self._settings: SettingsService = settings_service
@@ -113,7 +115,7 @@ class HeatPumpControlService(Service):
 
     @property
     def relay(self) -> RelayChannel:
-        return self.relays[self.RELAY_INDEX]
+        return self.relays[self._relay_index]
 
     # ---- relay control (logical state) ----
 
@@ -244,7 +246,7 @@ class HeatPumpControlService(Service):
                                   writeable=True, onchange=self._on_running_thresh_change,
                                   text=lambda v: f"{v:.0f} W"))
 
-        self.add_item(IntegerItem("/Relay", self.RELAY_INDEX,
+        self.add_item(IntegerItem("/Relay", self._relay_index,
                                   text=lambda v: f"Relay {v+1}"))
 
         self.add_item(EnumItem("/State", SERVICE_STATE, value=SERVICE_STATE(self.items.state)))
@@ -386,13 +388,14 @@ class HeatPumpControlService(Service):
 
 
 class HeatpumpMonitor(Monitor):
-    def __init__(self, bus, **kwargs):
+    def __init__(self, bus, relay_index, **kwargs):
         super().__init__(bus, handlers={
             HeatpumpService.servicetype: HeatpumpService,
             SystemService.servicetype: SystemService,
             SettingsService.servicetype: SettingsService,
         }, **kwargs)
 
+        self._relay_index: int | None = relay_index
         self._system: SystemService | None = None
         self._settings: SettingsService | None = None
         self._heatpumps: dict[str, HeatpumpService] = {}
@@ -427,7 +430,7 @@ class HeatpumpMonitor(Monitor):
     async def _start_control(self):
         if self._control_service is None:
             self._control_service = HeatPumpControlService(
-                self.bus, self._system, self._settings, self._heatpump)
+                self.bus, self._relay_index, self._system, self._settings, self._heatpump)
             logger.info("Ready, starting " + self._control_service.productname or "...")
             await self._control_service.register()
 
@@ -468,6 +471,8 @@ async def main():
             default='system')
     parser.add_argument('--debug', help='Turn on debug logging',
             default=False, action='store_true')
+    parser.add_argument('--relay', help='Define GX relay to be used',
+            choices=[1, 2], type=int, default=None)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -482,8 +487,12 @@ async def main():
         "session": BusType.SESSION
     }.get(args.dbus, BusType.SYSTEM)
 
+    relay_index = None
+    if args.relay is not None:
+        relay_index = args.relay-1 # to 0-based
+
     bus = await MessageBus(bus_type=bus_type).connect()
-    _ = await HeatpumpMonitor.create(bus)
+    _ = await HeatpumpMonitor.create(bus, relay_index=relay_index)
 
     try:
         await bus.wait_for_disconnect()
