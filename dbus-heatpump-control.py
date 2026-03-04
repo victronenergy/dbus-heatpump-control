@@ -498,7 +498,10 @@ async def main():
         await bus.wait_for_disconnect()
     except asyncio.CancelledError:
         pass
+    except Exception as e:
+        logger.error(f"A fatal error occured: {e}")
     finally:
+        logger.info("Terminating")
         try:
             bus.disconnect()
         except Exception:

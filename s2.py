@@ -611,9 +611,10 @@ class HeatpumpOMBC(OMBCControlType):
         await self.send_power_measurement()
         logger.info("OMBC activated")
 
-    def deactivate(self, conn):
+    async def deactivate(self, conn):
         self._active = False
         self._ctrl.items.s2_active = 0
+        await self._ctrl._set_relay_on(False)
         if self._pm_task and not self._pm_task.done():
             self._pm_task.cancel()
         logger.info("OMBC deactivated")
