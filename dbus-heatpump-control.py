@@ -480,8 +480,6 @@ async def main():
         format="%(levelname)s %(message)s",
     )
 
-    logger.info(f"*** dbus-heatpump-control {VERSION} ***")
-
     bus_type = {
         "system": BusType.SYSTEM,
         "session": BusType.SESSION
