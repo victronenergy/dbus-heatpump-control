@@ -23,11 +23,11 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'ext', 'aiovelib'))
 
 from aiovelib.service import IntegerItem, Service, TextItem
 from aiovelib.client import Monitor, Service as ObservableService
+from aiovelib.s2 import S2ResourceManagerItem
 
 from version import VERSION
 from s2 import (
     S2Adapter,
-    S2ResourceManagerItem,
     HeatpumpOMBC,
     HeatpumpNOCTRL,
     phases_to_commodity,
