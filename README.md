@@ -37,3 +37,7 @@ The service uses the power measurements provided by the VM-3P75CT to learn the h
 It detects "running" states based on a threshold, stores recent running samples in a rolling time window, and derives a representative expected power using a configurable quantile combined with exponential smoothing (EWMA).
 
 This enables the system to model the heatpump as a stable and predictable load for S2's Operation Mode Based Control (OMBC), even though SG-Ready itself only offers binary ON/OFF signaling.
+
+## Limitations
+
+Only works with a single `com.victronenergy.heatpump` service in the system.
