@@ -45,6 +45,7 @@ class HeatpumpOMBC(OMBCControlType):
         self._ctrl = ctrl
         self._active = False
         self._previous_operation_mode_id: str | None = None
+        self._send_lock = asyncio.Lock()
 
         self._id_off = uuid.uuid4()
         self._id_on = uuid.uuid4()
@@ -169,14 +170,13 @@ class HeatpumpOMBC(OMBCControlType):
         self._ctrl.items.s2_active = 1
 
         # send system description; if not OK, roll back
-        resp = await self.send_system_description()
+        resp = await self.send_ombc_system_description()
         if (resp is None) or (resp.status != ReceptionStatusValues.OK):
             logger.error("OMBC activation failed, reception: %s", resp)
-            self.deactivate(conn)
+            await self.deactivate(conn)
             return
 
-        # send initial status + power
-        await self.send_status(self._ctrl.state_on)
+        # send initial power (status is already sent by send_ombc_system_description)
         await self.send_power_measurement()
         logger.info("OMBC activated")
 
@@ -188,17 +188,21 @@ class HeatpumpOMBC(OMBCControlType):
             self._pm_task.cancel()
         logger.info("OMBC deactivated")
 
-    async def send_system_description(self):
+    async def send_ombc_system_description(self):
         if not self._active:
             return
-        try:
-            desc = self._make_system_description()
-            await self._ctrl.rm_item.send_msg_and_await_reception_status(desc)
-            return await self.send_status(self._ctrl.state_on)
-        except Exception as e:
-            logger.error("Failed to send OMBCSystemDescription: %s", e)
 
-    async def send_status(self, on: bool):
+        async with self._send_lock:
+            if not self._active:
+                return
+            try:
+                desc = self._make_system_description()
+                await self._ctrl.rm_item.send_msg_and_await_reception_status(desc)
+                return await self._send_status_unlocked(self._ctrl.state_on)
+            except Exception as e:
+                logger.error("Failed to send OMBCSystemDescription: %s", e)
+
+    async def _send_status_unlocked(self, on: bool):
         if not self._active:
             return
 
@@ -218,6 +222,10 @@ class HeatpumpOMBC(OMBCControlType):
             logger.error("Failed to send OMBCStatus: %s", e)
         finally:
             self._previous_operation_mode_id = op_id
+
+    async def send_status(self, on: bool):
+        async with self._send_lock:
+            return await self._send_status_unlocked(on)
 
     def schedule_power_measurement(self):
         if self._pm_task is None or self._pm_task.done():
@@ -295,12 +303,12 @@ class S2Adapter:
 
         async def _send():
             try:
-                await self.ombc.send_system_description()
+                await self.ombc.send_ombc_system_description()
             finally:
                 if self._sysdesc_pending:
                     self._sysdesc_pending = False
                     await asyncio.sleep(0.5)
-                    await self.ombc.send_system_description()
+                    await self.ombc.send_ombc_system_description()
 
         self._sysdesc_task = asyncio.create_task(_send())
 

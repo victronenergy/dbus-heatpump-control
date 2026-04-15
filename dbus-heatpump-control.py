@@ -177,7 +177,7 @@ class HeatPumpControlService(Service):
         if not allow_ombc and getattr(self, "_ombc", None) and self._ombc.active:
             try:
                 # Prefer the control type to deactivate itself
-                self._ombc.deactivate(None)
+                await self._ombc.deactivate(None)
             except Exception:
                 # fallback: at least reflect locally
                 self.items.s2_active = 0
