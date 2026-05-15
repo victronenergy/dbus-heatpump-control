@@ -301,11 +301,6 @@ class HpItems:
         self.set_setting("/Settings/HeatpumpControl/EstimatedPowerOff", int(v))
         self.set_local("/EstimatedPowerOff", int(v))
 
-    def set_active_estimated_power(self, relay_on: bool) -> None:
-        v = self.estimated_power_on if relay_on else self.estimated_power_off
-        if v is not None:
-            self.set_local("/EstimatedPower", int(v))
-
     @property
     def state(self) -> SERVICE_STATE:
         i = self.get_int("/State", 2)

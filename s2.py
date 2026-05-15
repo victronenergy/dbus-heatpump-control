@@ -1,4 +1,5 @@
 import uuid
+import time
 import logging
 import asyncio
 from datetime import datetime, timezone
@@ -277,6 +278,7 @@ class S2Adapter:
 
         self._sysdesc_task: asyncio.Task | None = None
         self._sysdesc_pending = False
+        self._last_sysdesc_time: float | None = None
 
         self._pm_task: asyncio.Task | None = None
 
@@ -298,6 +300,12 @@ class S2Adapter:
         if not self.ombc_active:
             return
 
+        now = time.monotonic()
+        # Throttle to maximum once per 30 seconds
+        if self._last_sysdesc_time is not None and (now - self._last_sysdesc_time) < 30:
+            self._sysdesc_pending = True
+            return
+
         if self._sysdesc_task and not self._sysdesc_task.done():
             self._sysdesc_pending = True
             return
@@ -305,11 +313,14 @@ class S2Adapter:
         async def _send():
             try:
                 await self.ombc.send_ombc_system_description()
+                self._last_sysdesc_time = time.monotonic()
             finally:
                 if self._sysdesc_pending:
                     self._sysdesc_pending = False
-                    await asyncio.sleep(0.5)
+                    # Wait 30 seconds before allowing the next send
+                    await asyncio.sleep(30)
                     await self.ombc.send_ombc_system_description()
+                    self._last_sysdesc_time = time.monotonic()
 
         self._sysdesc_task = asyncio.create_task(_send())
 
