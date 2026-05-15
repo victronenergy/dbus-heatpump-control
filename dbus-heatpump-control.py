@@ -83,7 +83,22 @@ class HeatPumpControlService(Service):
         self.relays = Relays(self._system, self._settings, count=2,
                              cfg=RelayConfig(required_function=self.REQUIRED_RELAY_FUNCTION))
 
-        self.est_mgr = EstimatorManager(PowerEstimator)
+        self.est_mgr_on = EstimatorManager(
+            PowerEstimator,
+            learn_when_running=True,
+            target_mode="quantile",
+            quantile_q=0.75,
+            alpha=0.05,
+            min_samples=20,
+        )
+        self.est_mgr_off = EstimatorManager(
+            PowerEstimator,
+            learn_when_running=False,
+            expected_floor_w=0.0,
+            target_mode="mean",
+            alpha=0.08,
+            min_samples=12,
+        )
 
         self._rm_item = None
         self._ombc = None
@@ -91,7 +106,8 @@ class HeatPumpControlService(Service):
         self.s2: S2Adapter | None = None
 
         self._prev_relay_state_change: float | None = None
-        self._last_estimate_update: float | None = time.monotonic()
+        self._last_estimate_update_on: float | None = time.monotonic()
+        self._last_estimate_update_off: float | None = time.monotonic()
 
     # ---- small domain properties used by OMBC / adapter ----
 
@@ -102,12 +118,20 @@ class HeatPumpControlService(Service):
     @property
     def hp_phases(self) -> int | None:
         # prefer estimator’s current (after phase change logic)
-        return self.est_mgr.hp_phases if self.est_mgr.hp_phases is not None else self._heatpump.phases
+        return self.est_mgr_on.hp_phases if self.est_mgr_on.hp_phases is not None else self._heatpump.phases
+
+    @property
+    def estimated_power_on_w(self) -> int:
+        return int(self.items.estimated_power_on)
+
+    @property
+    def estimated_power_off_w(self) -> int:
+        return int(self.items.estimated_power_off)
 
     @property
     def estimated_power_w(self) -> int:
-        # always comes from the DBus item to stay consistent with what we publish
-        return int(self.items.estimated_power)
+        # Backward compatibility alias: ON-mode estimate.
+        return self.estimated_power_on_w
 
     @property
     def state_on(self) -> bool:
@@ -146,7 +170,9 @@ class HeatPumpControlService(Service):
         st = self.relay.state
         if st is None:
             return
-        self.items.state = SERVICE_STATE.ON if st == RELAY_STATE.ON else SERVICE_STATE.OFF
+        relay_on = (st == RELAY_STATE.ON)
+        self.items.state = SERVICE_STATE.ON if relay_on else SERVICE_STATE.OFF
+        self.items.set_active_estimated_power(relay_on)
 
     def _relay_function_ok(self) -> bool:
         try:
@@ -254,6 +280,8 @@ class HeatPumpControlService(Service):
         self.add_item(TextItem("/Service", self._heatpump.name))
         self.add_item(IntegerItem("/Ac/Power", None, text=lambda v: f"{v:.0f} W" if v is not None else "--"))
         self.add_item(IntegerItem("/EstimatedPower", None, text=lambda v: f"{v:.0f} W" if v is not None else "--"))
+        self.add_item(IntegerItem("/EstimatedPowerOn", None, text=lambda v: f"{v:.0f} W" if v is not None else "--"))
+        self.add_item(IntegerItem("/EstimatedPowerOff", None, text=lambda v: f"{v:.0f} W" if v is not None else "--"))
 
         self.add_item(IntegerItem("/DeviceInstance", 0))
         self.add_item(TextItem("/ProductName", self.productname))
@@ -261,11 +289,22 @@ class HeatPumpControlService(Service):
         # init estimator
         phases = self._heatpump.phases
         phases = int(phases) if phases in (1, 3) else None
-        self.est_mgr.init(nominal_w=self.items.estimated_power, phases=phases, running_thr=self.items.running_threshold)
+        self.est_mgr_on.init(
+            nominal_w=max(1, int(self.items.estimated_power_on)),
+            phases=phases,
+            running_thr=self.items.running_threshold,
+        )
+        self.est_mgr_off.init(
+            nominal_w=max(1, int(self.items.estimated_power_off)),
+            phases=phases,
+            running_thr=self.items.running_threshold,
+        )
 
         # init current + estimated
         self.items.current_power = self._heatpump.power.total
-        self.items.estimated_power = self.est_mgr.estimated_total()
+        self.items.estimated_power_on = self.est_mgr_on.estimated_total()
+        self.items.estimated_power_off = self.est_mgr_off.estimated_total()
+        self.items.set_active_estimated_power(self.state_on)
 
         # adapter
         self.s2 = S2Adapter(ctrl=self, rm_item=self._rm_item, ombc=self._ombc, noctrl=self._noctrl)
@@ -301,8 +340,9 @@ class HeatPumpControlService(Service):
 
     def _on_power_setting_change(self, val: int):
         self.items.power_setting = val
-        self.est_mgr.set_nominal(int(val), mode="auto", clear_history=True)
-        self.items.estimated_power = self.est_mgr.estimated_total()
+        self.est_mgr_on.set_nominal(int(val), mode="auto", clear_history=True)
+        self.items.estimated_power_on = self.est_mgr_on.estimated_total()
+        self.items.set_active_estimated_power(self.state_on)
         if self.s2:
             self.s2.request_system_description()
         logger.info("Power setting changed to %s W, estimator got reset", val)
@@ -310,7 +350,8 @@ class HeatPumpControlService(Service):
 
     def _on_running_thresh_change(self, val: int):
         self.items.running_threshold = val
-        self.est_mgr.set_running_threshold(int(val), clear_history=True)
+        self.est_mgr_on.set_running_threshold(int(val), clear_history=True)
+        self.est_mgr_off.set_running_threshold(int(val), clear_history=True)
         logger.info("Running threshold changed to %s W", val)
         return True
 
@@ -334,19 +375,28 @@ class HeatPumpControlService(Service):
         if service.power.valid:
             self.items.current_power = service.power.total
 
-            if self.state_on:
-                # learn only when state is ON
-                changed_significantly = self.est_mgr.feed(service.power)
+            relay_on = self.state_on
+            est_mgr = self.est_mgr_on if relay_on else self.est_mgr_off
+            last_ts = self._last_estimate_update_on if relay_on else self._last_estimate_update_off
 
-                now = time.monotonic()
-                diff = now - self._last_estimate_update
-                if changed_significantly and diff >= self.MAX_EST_UPDATE_S:
-                    est = self.est_mgr.estimated_total()
-                    est_rounded = self.round_up_to_50(est)
-                    self.items.estimated_power = est_rounded
-                    logging.info(f"Updated estimated power to {est_rounded} W")
-                    update_sysdesc = True
-                    self._last_estimate_update = now
+            changed_significantly = est_mgr.feed(service.power)
+
+            now = time.monotonic()
+            diff = now - (last_ts or now)
+            if changed_significantly and diff >= self.MAX_EST_UPDATE_S:
+                est_rounded = self.round_up_to_50(est_mgr.estimated_total())
+
+                if relay_on:
+                    self.items.estimated_power_on = est_rounded
+                    self._last_estimate_update_on = now
+                    logging.info(f"Updated ON estimated power to {est_rounded} W")
+                else:
+                    self.items.estimated_power_off = est_rounded
+                    self._last_estimate_update_off = now
+                    logging.info(f"Updated OFF estimated power to {est_rounded} W")
+
+                self.items.set_active_estimated_power(relay_on)
+                update_sysdesc = True
 
             # report power measurements when any control type active
             if self.s2.any_active:
@@ -355,8 +405,12 @@ class HeatPumpControlService(Service):
         # phase change
         if "/NrOfPhases" in values:
             p = service.phases
-            if p in (1, 3) and self.est_mgr.set_phases(int(p), keep_expected=True):
-                self.items.estimated_power = self.est_mgr.estimated_total()
+            changed_on = p in (1, 3) and self.est_mgr_on.set_phases(int(p), keep_expected=True)
+            changed_off = p in (1, 3) and self.est_mgr_off.set_phases(int(p), keep_expected=True)
+            if changed_on or changed_off:
+                self.items.estimated_power_on = self.est_mgr_on.estimated_total()
+                self.items.estimated_power_off = self.est_mgr_off.estimated_total()
+                self.items.set_active_estimated_power(self.state_on)
                 update_sysdesc = True
 
         if update_sysdesc:

@@ -64,14 +64,15 @@ class HeatpumpOMBC(OMBCControlType):
     def _make_system_description(self) -> OMBCSystemDescription:
         commodity = phases_to_commodity(self._ctrl.hp_phases)
 
-        est = int(self._ctrl.estimated_power_w)
+        est_on = int(self._ctrl.estimated_power_on_w)
+        est_off = int(self._ctrl.estimated_power_off_w)
         op_on = OMBCOperationMode(
             id=str(self._id_on),
             diagnostic_label="On",
             abnormal_condition_only=False,
             power_ranges=[PowerRange(
-                start_of_range=est,
-                end_of_range=est,
+                start_of_range=est_on,
+                end_of_range=est_on,
                 commodity_quantity=commodity,
             )],
         )
@@ -81,8 +82,8 @@ class HeatpumpOMBC(OMBCControlType):
             diagnostic_label="Off",
             abnormal_condition_only=False,
             power_ranges=[PowerRange(
-                start_of_range=0,
-                end_of_range=0,
+                start_of_range=est_off,
+                end_of_range=est_off,
                 commodity_quantity=commodity,
             )],
         )

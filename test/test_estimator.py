@@ -1,0 +1,67 @@
+import os
+import sys
+import unittest
+
+# aiovelib must be available before utils import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'ext', 'aiovelib'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from utils import HeatpumpPowerEstimator, Power
+
+class TestHeatpumpPowerEstimator(unittest.TestCase):
+    def test_recreate_keeps_expected_total(self):
+        est = HeatpumpPowerEstimator(
+            nominal_total_w=2000,
+            phases=1,
+            running_threshold_w=400,
+            expected_floor_w=0,
+        )
+        est._expected_total = 1234.0
+
+        new_est = est.recreate(phases=3, keep_expected=True)
+
+        self.assertAlmostEqual(new_est.expected_P_total, 1234.0)
+        self.assertEqual(new_est.phases, 3)
+
+    def test_significant_change_detects_downward_shift(self):
+        est = HeatpumpPowerEstimator(
+            nominal_total_w=2000,
+            phases=1,
+            running_threshold_w=400,
+            expected_floor_w=0,
+            significant_abs_w=1000,
+            significant_rel=0.10,
+        )
+        est._last_reported_expected_total = 1000.0
+
+        self.assertTrue(est._significant_change(850.0))
+
+    def test_off_mode_mean_handles_mixed_idle_and_low_power(self):
+        est = HeatpumpPowerEstimator(
+            nominal_total_w=600,
+            phases=None,
+            running_threshold_w=600,
+            expected_floor_w=0,
+            alpha=1.0,
+            target_mode="mean",
+            min_samples=3,
+            learn_when_running=False,
+        )
+
+        # First sample only initializes timing baseline.
+        est.feed(power=Power(0, None, None))
+
+        # Learn from <= threshold samples only.
+        est.feed(power=Power(0, None, None))
+        est.feed(power=Power(300, None, None))
+        est.feed(power=Power(0, None, None))
+
+        self.assertAlmostEqual(est.expected_P_total, 100.0)
+
+        # > threshold sample is ignored in off-learning mode.
+        est.feed(power=Power(1500, None, None))
+        self.assertAlmostEqual(est.expected_P_total, 100.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

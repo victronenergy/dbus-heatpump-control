@@ -87,7 +87,8 @@ class SettingsService(ObservableSettingsService):
 			Setting("/Settings/HeatpumpControl/OffHysteresis", OFF_HYSTERESIS_S, _min=600),
             Setting("/Settings/HeatpumpControl/PowerSetting", POWER_SETTING_W, _min=0),
             Setting("/Settings/HeatpumpControl/RunningThreshold", RUNNING_THRESH_W, _min=0),
-            Setting("/Settings/HeatpumpControl/EstimatedPower", POWER_SETTING_W, _min=0)
+			Setting("/Settings/HeatpumpControl/EstimatedPowerOn", POWER_SETTING_W, _min=0),
+            Setting("/Settings/HeatpumpControl/EstimatedPowerOff", 0, _min=0)
 		)
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +103,7 @@ class Power:
 
     @property
     def valid(self) -> bool:
-        return any((self.l1, self.l2, self.l3))
+        return any(v is not None for v in (self.l1, self.l2, self.l3))
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -283,13 +284,27 @@ class HpItems:
         self.set_local("/Ac/Power", v)
 
     @property
-    def estimated_power(self) -> int:
-        return self.get_setting("/Settings/HeatpumpControl/EstimatedPower")
+    def estimated_power_on(self) -> int:
+        return self.get_setting("/Settings/HeatpumpControl/EstimatedPowerOn")
 
-    @estimated_power.setter
-    def estimated_power(self, v: int):
-        self.set_setting("/Settings/HeatpumpControl/EstimatedPower", int(v))
-        self.set_local("/EstimatedPower", int(v))
+    @estimated_power_on.setter
+    def estimated_power_on(self, v: int):
+        self.set_setting("/Settings/HeatpumpControl/EstimatedPowerOn", int(v))
+        self.set_local("/EstimatedPowerOn", int(v))
+
+    @property
+    def estimated_power_off(self) -> int:
+        return self.get_setting("/Settings/HeatpumpControl/EstimatedPowerOff")
+
+    @estimated_power_off.setter
+    def estimated_power_off(self, v: int):
+        self.set_setting("/Settings/HeatpumpControl/EstimatedPowerOff", int(v))
+        self.set_local("/EstimatedPowerOff", int(v))
+
+    def set_active_estimated_power(self, relay_on: bool) -> None:
+        v = self.estimated_power_on if relay_on else self.estimated_power_off
+        if v is not None:
+            self.set_local("/EstimatedPower", int(v))
 
     @property
     def state(self) -> SERVICE_STATE:
@@ -305,8 +320,9 @@ class HpItems:
 
 
 class EstimatorManager:
-    def __init__(self, estimator_factory: Callable[..., object]):
+    def __init__(self, estimator_factory: Callable[..., object], **estimator_kwargs):
         self._make = estimator_factory
+        self._kwargs = dict(estimator_kwargs)
         self.est = None
         self.hp_phases: int | None = None
 
@@ -316,6 +332,7 @@ class EstimatorManager:
             nominal_total_w=nominal_w,
             phases=self.hp_phases,
             running_threshold_w=running_thr,
+            **self._kwargs,
         )
 
     def feed(self, power) -> bool:
@@ -354,7 +371,7 @@ class HeatpumpPowerEstimator:
 
       - Consider HP "running" when P_total > running_threshold_w
       - Keep a rolling window of running samples (time-based)
-      - target = quantile(window, q)
+    - target from rolling window (quantile or mean)
       - expected_P_total = EWMA toward target
       - per-phase estimate derived from expected total
     """
@@ -370,10 +387,13 @@ class HeatpumpPowerEstimator:
         alpha: float = 0.05,
         expected_floor_w: float = 300.0,
         expected_cap_mult: float | None = None,
+        target_mode: str = "quantile",  # "quantile" | "mean"
+        min_samples: int = 20,
 
         # "significant change" thresholds for feed() return value
         significant_abs_w: float = 25.0,
         significant_rel: float = 0.10,
+        learn_when_running: bool = True,
     ):
         if nominal_total_w <= 0:
             raise ValueError("nominal_total_w must be > 0")
@@ -393,9 +413,16 @@ class HeatpumpPowerEstimator:
 
         self.expected_floor_w = expected_floor_w
         self.expected_cap_mult = expected_cap_mult
+        self.target_mode = str(target_mode)
+        if self.target_mode not in ("quantile", "mean"):
+            raise ValueError("target_mode must be 'quantile' or 'mean'")
+        self.min_samples = int(min_samples)
+        if self.min_samples < 1:
+            raise ValueError("min_samples must be >= 1")
 
         self.significant_abs_w = float(significant_abs_w)
         self.significant_rel = float(significant_rel)
+        self.learn_when_running = bool(learn_when_running)
 
         # Track whether threshold was auto-derived so we can keep it consistent on nominal changes
         self._running_threshold_w_explicit = (running_threshold_w is not None)
@@ -534,14 +561,20 @@ class HeatpumpPowerEstimator:
 
         p_total = self._estimate_total_power(power)
 
-        # Only learn from running samples
-        if p_total > self.running_threshold_w:
+        should_learn = (
+            p_total > self.running_threshold_w
+            if self.learn_when_running
+            else p_total <= self.running_threshold_w
+        )
+
+        # Learn from the selected sample class (running or idle)
+        if should_learn:
             self._run_hist.append((self._t, p_total))
             self._trim()
 
-            if len(self._run_hist) >= 20:
+            if len(self._run_hist) >= self.min_samples:
                 window_vals = [v for _, v in self._run_hist]
-                target = _quantile(window_vals, self.quantile_q)
+                target = self._target_from_window(window_vals)
 
                 new_expected = (1.0 - self.alpha) * self._expected_total + self.alpha * target
                 if self.expected_cap_mult is None:
@@ -574,8 +607,11 @@ class HeatpumpPowerEstimator:
             alpha=self.alpha,
             expected_floor_w=self.expected_floor_w,
             expected_cap_mult=self.expected_cap_mult,
+            target_mode=self.target_mode,
+            min_samples=self.min_samples,
             significant_abs_w=self.significant_abs_w,
             significant_rel=self.significant_rel,
+            learn_when_running=self.learn_when_running,
         )
 
         # preserve explicit/auto threshold behavior
@@ -587,10 +623,10 @@ class HeatpumpPowerEstimator:
 
             new_expected = self._expected_total
             if self.expected_cap_mult is None:
-                self._expected_total = max(self.expected_floor_w, new_expected)
+                new._expected_total = max(self.expected_floor_w, new_expected)
             else:
                 cap = self.expected_cap_mult * self.nominal_total_w
-                self._expected_total = _clamp(new_expected, self.expected_floor_w, cap)
+                new._expected_total = _clamp(new_expected, self.expected_floor_w, cap)
 
         return new
 
@@ -605,9 +641,9 @@ class HeatpumpPowerEstimator:
         return present if present in (1, 3) else None
 
     def _estimate_total_power(self, power: Power) -> float:
-        vals = [v for v in (power.l1, power.l2, power.l3) if v is not None and v != 0]
+        vals = [v for v in (power.l1, power.l2, power.l3) if v is not None]
         if not vals:
-            raise ValueError("At least one of L1/L2/L3 must be non-zero and not None.")
+            raise ValueError("At least one of L1/L2/L3 must be not None.")
         vals_f = [float(v) for v in vals]
         total = sum(vals_f)
 
@@ -630,6 +666,11 @@ class HeatpumpPowerEstimator:
         while self._run_hist and self._run_hist[0][0] < cutoff:
             self._run_hist.popleft()
 
+    def _target_from_window(self, values: list[float]) -> float:
+        if self.target_mode == "mean":
+            return float(sum(values) / len(values)) if values else 0.0
+        return _quantile(values, self.quantile_q)
+
     def _significant_change(self, new_expected: float) -> bool:
         old = self._last_reported_expected_total
         if old is None:
@@ -640,4 +681,4 @@ class HeatpumpPowerEstimator:
             return True
         # relative check against the larger of old/floor to avoid noisy % at low power
         denom = max(abs(old), self.expected_floor_w, 1.0)
-        return (delta / denom) >= self.significant_rel
+        return abs(delta / denom) >= self.significant_rel
