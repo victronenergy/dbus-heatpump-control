@@ -105,7 +105,8 @@ class HeatPumpControlService(Service):
         self._noctrl = None
         self.s2: S2Adapter | None = None
 
-        self._prev_relay_state_change: float | None = None
+        self._last_switched_on_ts: float | None = None
+        self._last_switched_off_ts: float | None = None
         self._last_estimate_update_on: float | None = time.monotonic()
         self._last_estimate_update_off: float | None = time.monotonic()
 
@@ -146,20 +147,40 @@ class HeatPumpControlService(Service):
     async def _set_relay_on(self, on: bool) -> None:
         try:
 
-            # Warn if command violates hystereses
+            # Enforce hysteresis windows for ON/OFF transitions.
             prev_on: bool = self.relay.state == RELAY_STATE.ON
             if prev_on != on:
+                now = time.monotonic()
+
+                if on and self._last_switched_off_ts is not None:
+                    diff = now - self._last_switched_off_ts
+                    if diff < self.items.on_hysteresis:
+                        remaining = int(self.items.on_hysteresis - diff)
+                        logger.warning(
+                            "Blocking ON: switched OFF only %d s ago, %d s remaining for on hysteresis",
+                            int(diff), remaining,
+                        )
+                        return
+
+                if (not on) and self._last_switched_on_ts is not None:
+                    diff = now - self._last_switched_on_ts
+                    if diff < self.items.off_hysteresis:
+                        remaining = int(self.items.off_hysteresis - diff)
+                        logger.warning(
+                            "Blocking OFF: switched ON only %d s ago, %d s remaining for off hysteresis",
+                            int(diff), remaining,
+                        )
+                        return
+
                 logger.debug(f"Switching relay to { 'ON' if on else 'OFF' }")
-                prev_ts = self._prev_relay_state_change
-                if prev_ts:
-                    diff = time.monotonic() - prev_ts
-                    if on and diff < self.items.on_hysteresis:
-                        logger.warning(f"Switching ON, but was switched off only { int(diff) } s ago")
-                    elif not on and diff < self.items.off_hysteresis:
-                        logger.warning(f"Switching OFF, but was switched on only { int(diff) } s ago")
-                self._prev_relay_state_change = time.monotonic()
 
             await self.relay.set_state(RELAY_STATE.ON if on else RELAY_STATE.OFF)
+            if prev_on != on:
+                ts = time.monotonic()
+                if on:
+                    self._last_switched_on_ts = ts
+                else:
+                    self._last_switched_off_ts = ts
         except Exception as e:
             logger.exception("Relay control failed: %s", e)
             await self._publish_allowed_control_types()
