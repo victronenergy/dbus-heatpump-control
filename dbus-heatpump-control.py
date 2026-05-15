@@ -363,10 +363,11 @@ class HeatPumpControlService(Service):
             self.s2.request_system_description()
 
     def _on_system_changed(self, service: SystemService, values: dict):
-        # reflect state changes
+        # reflect state/function changes
         st_path = self.relay.state_path()
+        fn_path = self.relay.function_path()
 
-        if st_path in values:
+        if st_path in values or fn_path in values:
             self._refresh_relay_state_from_services()
 
         # status updates only relevant for OMBC
@@ -374,14 +375,6 @@ class HeatPumpControlService(Service):
             self.s2.notify_state_changed(self.state_on)
 
     def _on_settings_changed(self, service: SettingsService, values: dict):
-        # if polarity changed for our relay, update displayed state immediately
-
-        fn_path = self.relay.function_path()
-        pol_path = self.relay.polarity_path()
-
-        if fn_path in values or pol_path in values:
-            self._refresh_relay_state_from_services()
-
         has_obmc = self._ombc in self.rm_item.control_types
         if has_obmc != self._is_ombc_allowed():
             asyncio.create_task(self._publish_allowed_control_types())

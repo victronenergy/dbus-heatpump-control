@@ -67,20 +67,17 @@ class HeatpumpService(ObservableService):
 
 class SystemService(ObservableService):
     servicetype = "com.victronenergy.system"
-    paths = [
-        "/Relay/0/State",
-        "/Relay/1/State",
-    ]
+    paths = {
+        "/SwitchableOutput/0/State",
+        "/SwitchableOutput/0/Settings/Function",
+        "/SwitchableOutput/1/State",
+        "/SwitchableOutput/1/Settings/Function",
+    }
 
 
 class SettingsService(ObservableSettingsService):
     servicetype = SETTINGS_SERVICE
-    paths = {
-        "/Settings/Relay/Function",
-        "/Settings/Relay/Polarity",
-        "/Settings/Relay/1/Function",
-        "/Settings/Relay/1/Polarity",
-    }
+    paths = set()
 
     async def add_rm_settings(self,
                               ON_HYSTERESIS_S: int, OFF_HYSTERESIS_S: int,
@@ -138,9 +135,8 @@ class RelayConfig:
 class RelayChannel:
     """
     0-based relay channel view with:
-      - polarity (0 normal, 1 inverted)
       - function gate (only allow control if function == required_function)
-      - raw function/polarity read + write
+      - raw function read + write
     """
     def __init__(self, index: int, system_service, settings_service, *, cfg: RelayConfig):
         self.index = int(index)
@@ -151,14 +147,10 @@ class RelayChannel:
     # ---- DBus paths ----
 
     def state_path(self) -> str:
-        return f"/Relay/{self.index}/State"
+        return f"/SwitchableOutput/{self.index}/State"
 
     def function_path(self) -> str:
-        # relay0 uses /Settings/Relay/*, relay1 uses /Settings/Relay/1/*
-        return "/Settings/Relay/Function" if self.index == 0 else f"/Settings/Relay/{self.index}/Function"
-
-    def polarity_path(self) -> str:
-        return "/Settings/Relay/Polarity" if self.index == 0 else f"/Settings/Relay/{self.index}/Polarity"
+        return f"/SwitchableOutput/{self.index}/Settings/Function"
 
     # ---- tidy IO helpers ----
 
@@ -170,18 +162,11 @@ class RelayChannel:
         await self._system.set_value(self.state_path(), int(raw))
 
     def _read_function(self) -> int | None:
-        v = self._settings.get_value(self.function_path())
+        v = self._system.get_value(self.function_path())
         return None if v is None else int(v)
 
     async def _write_function(self, raw: int) -> None:
-        await self._settings.set_value(self.function_path(), int(raw))
-
-    def _read_polarity(self) -> int | None:
-        v = self._settings.get_value(self.polarity_path())
-        return None if v is None else int(v)
-
-    async def _write_polarity(self, raw: int) -> None:
-        await self._settings.set_value(self.polarity_path(), int(raw))
+        await self._system.set_value(self.function_path(), int(raw))
 
     # ---- public raw access ----
 
@@ -192,13 +177,6 @@ class RelayChannel:
     async def set_function_raw(self, raw: int) -> None:
         await self._write_function(raw)
 
-    @property
-    def polarity_raw(self) -> int | None:
-        return self._read_polarity()
-
-    async def set_polarity_raw(self, raw: int) -> None:
-        await self._write_polarity(raw)
-
     # ---- gating + logical state ----
 
     @property
@@ -206,28 +184,17 @@ class RelayChannel:
         f = self._read_function()
         return (f is not None) and (f == self._cfg.required_function)
 
-    def _apply_polarity_to_raw(self, logical: RELAY_STATE) -> int:
-        pol = self._read_polarity() or 0
-        # polarity==1 -> invert meaning on wire
-        raw = int(logical)
-        return raw ^ (1 if pol else 0)
-
-    def _raw_to_logical(self, raw: int) -> RELAY_STATE:
-        pol = self._read_polarity() or 0
-        logical = raw ^ (1 if pol else 0)
-        return RELAY_STATE.ON if logical else RELAY_STATE.OFF
-
     @property
     def state(self) -> RELAY_STATE | None:
         raw = self._read_state_raw()
         if raw is None:
             return None
-        return self._raw_to_logical(raw)
+        return RELAY_STATE.ON if raw else RELAY_STATE.OFF
 
     async def set_state(self, state: RELAY_STATE) -> None:
         if not self.controllable:
             raise RuntimeError(f"Relay {self.index} blocked: Function != {self._cfg.required_function}")
-        await self._write_state_raw(self._apply_polarity_to_raw(state))
+        await self._write_state_raw(int(state))
 
 
 class Relays:
