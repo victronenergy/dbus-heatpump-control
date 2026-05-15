@@ -52,6 +52,8 @@ class HeatpumpOMBC(OMBCControlType):
         self._id_on = uuid.uuid4()
         self._id_on_off = uuid.uuid4()
         self._id_off_on = uuid.uuid4()
+        self._id_on_timer = uuid.uuid4()
+        self._id_off_timer = uuid.uuid4()
 
         self._pm_task: asyncio.Task | None = None
         self._apply_task: asyncio.Task | None = None
@@ -90,13 +92,13 @@ class HeatpumpOMBC(OMBCControlType):
         )
 
         on_timer = Timer(
-            id=uuid.uuid4(),
+            id=self._id_on_timer,
             diagnostic_label="On hysteresis",
             duration=Duration.from_milliseconds(self._ctrl.items.on_hysteresis * 1000),
 
         )
         off_timer = Timer(
-            id=uuid.uuid4(),
+            id=self._id_off_timer,
             diagnostic_label="Off hysteresis",
             duration=Duration.from_milliseconds(self._ctrl.items.off_hysteresis * 1000),
         )
