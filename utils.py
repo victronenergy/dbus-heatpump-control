@@ -364,9 +364,9 @@ class HeatpumpPowerEstimator:
     """
     Expected running power estimator.
 
-      - Consider HP "running" when P_total > running_threshold_w
-      - Keep a rolling window of running samples (time-based)
-    - target from rolling window (quantile or mean)
+      - Keep a rolling window of selected samples (time-based)
+      - Optional threshold filter can classify samples by running_threshold_w
+      - target from rolling window (quantile or mean)
       - expected_P_total = EWMA toward target
       - per-phase estimate derived from expected total
     """
@@ -389,6 +389,7 @@ class HeatpumpPowerEstimator:
         significant_abs_w: float = 25.0,
         significant_rel: float = 0.10,
         learn_when_running: bool = True,
+        apply_running_threshold: bool = False,
     ):
         if nominal_total_w <= 0:
             raise ValueError("nominal_total_w must be > 0")
@@ -418,6 +419,7 @@ class HeatpumpPowerEstimator:
         self.significant_abs_w = float(significant_abs_w)
         self.significant_rel = float(significant_rel)
         self.learn_when_running = bool(learn_when_running)
+        self.apply_running_threshold = bool(apply_running_threshold)
 
         # Track whether threshold was auto-derived so we can keep it consistent on nominal changes
         self._running_threshold_w_explicit = (running_threshold_w is not None)
@@ -556,11 +558,15 @@ class HeatpumpPowerEstimator:
 
         p_total = self._estimate_total_power(power)
 
-        should_learn = (
-            p_total > self.running_threshold_w
-            if self.learn_when_running
-            else p_total <= self.running_threshold_w
-        )
+        if self.apply_running_threshold:
+            should_learn = (
+                p_total > self.running_threshold_w
+                if self.learn_when_running
+                else p_total <= self.running_threshold_w
+            )
+        else:
+            # Default: learn every sample for the active relay state estimator.
+            should_learn = True
 
         # Learn from the selected sample class (running or idle)
         if should_learn:
@@ -607,6 +613,7 @@ class HeatpumpPowerEstimator:
             significant_abs_w=self.significant_abs_w,
             significant_rel=self.significant_rel,
             learn_when_running=self.learn_when_running,
+            apply_running_threshold=self.apply_running_threshold,
         )
 
         # preserve explicit/auto threshold behavior

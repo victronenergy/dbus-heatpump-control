@@ -36,7 +36,7 @@ class TestHeatpumpPowerEstimator(unittest.TestCase):
 
         self.assertTrue(est._significant_change(850.0))
 
-    def test_off_mode_mean_handles_mixed_idle_and_low_power(self):
+    def test_off_mode_mean_learns_across_full_off_range(self):
         est = HeatpumpPowerEstimator(
             nominal_total_w=600,
             phases=None,
@@ -51,16 +51,38 @@ class TestHeatpumpPowerEstimator(unittest.TestCase):
         # First sample only initializes timing baseline.
         est.feed(power=Power(0, None, None))
 
-        # Learn from <= threshold samples only.
+        # OFF-mode learns all samples, independent of running threshold.
         est.feed(power=Power(0, None, None))
         est.feed(power=Power(300, None, None))
         est.feed(power=Power(0, None, None))
 
         self.assertAlmostEqual(est.expected_P_total, 100.0)
 
-        # > threshold sample is ignored in off-learning mode.
+        # > threshold sample is also included for OFF-mode learning.
         est.feed(power=Power(1500, None, None))
-        self.assertAlmostEqual(est.expected_P_total, 100.0)
+        self.assertAlmostEqual(est.expected_P_total, 450.0)
+
+    def test_on_mode_mean_also_learns_independent_of_threshold(self):
+        est = HeatpumpPowerEstimator(
+            nominal_total_w=2000,
+            phases=None,
+            running_threshold_w=600,
+            expected_floor_w=0,
+            alpha=1.0,
+            target_mode="mean",
+            min_samples=3,
+            learn_when_running=True,
+        )
+
+        # First sample initializes timing baseline.
+        est.feed(power=Power(0, None, None))
+
+        # ON-mode learns all samples by default (relay-state-conditioned).
+        est.feed(power=Power(100, None, None))
+        est.feed(power=Power(1200, None, None))
+        est.feed(power=Power(200, None, None))
+
+        self.assertAlmostEqual(est.expected_P_total, 500.0)
 
 
 if __name__ == "__main__":

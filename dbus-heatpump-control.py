@@ -367,8 +367,8 @@ class HeatPumpControlService(Service):
 
     def _on_running_thresh_change(self, val: int):
         self.items.running_threshold = val
-        self.est_mgr_on.set_running_threshold(int(val), clear_history=True)
-        self.est_mgr_off.set_running_threshold(int(val), clear_history=True)
+        self.est_mgr_on.set_running_threshold(int(val), clear_history=False)
+        self.est_mgr_off.set_running_threshold(int(val), clear_history=False)
         logger.info("Running threshold changed to %s W", val)
         return True
 
