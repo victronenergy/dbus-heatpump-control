@@ -9,8 +9,8 @@ import math
 import uuid
 import asyncio
 import logging
-import datetime
 from argparse import ArgumentParser
+from datetime import datetime, timezone, timedelta
 
 from dbus_fast.aio import MessageBus
 from dbus_fast.constants import BusType
@@ -176,7 +176,7 @@ class HeatPumpControlService(Service):
 
                         if self._can_send_ombc_timer_status:
                             try:
-                                finished_at = datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining)
+                                finished_at = datetime.now(timezone.utc) + timedelta(seconds=remaining)
                                 await self.rm_item.send_msg_and_await_reception_status(
                                     OMBCTimerStatus(
                                         message_id=uuid.uuid4(),
@@ -200,7 +200,7 @@ class HeatPumpControlService(Service):
 
                         if self._can_send_ombc_timer_status:
                             try:
-                                finished_at = datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining)
+                                finished_at = datetime.now(timezone.utc) + timedelta(seconds=remaining)
                                 await self.rm_item.send_msg_and_await_reception_status(
                                     OMBCTimerStatus(
                                         message_id=uuid.uuid4(),
