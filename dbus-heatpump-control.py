@@ -9,6 +9,7 @@ import math
 import uuid
 import asyncio
 import logging
+import datetime
 from argparse import ArgumentParser
 
 from dbus_fast.aio import MessageBus
@@ -17,6 +18,7 @@ from dbus_fast.constants import BusType
 from s2python.s2_asset_details import AssetDetails
 from s2python.generated.gen_s2 import RoleType
 from s2python.common import Role, Duration, Commodity
+from s2python.ombc import OMBCTimerStatus
 
 # aiovelib
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'ext', 'aiovelib'))
@@ -142,6 +144,16 @@ class HeatPumpControlService(Service):
     def relay(self) -> RelayChannel:
         return self.relays[self._relay_index]
 
+    @property
+    def _can_send_ombc_timer_status(self) -> bool:
+        return bool(
+            self.rm_item is not None and
+            self.rm_item.is_ready and
+            self.rm_item.is_connected and
+            self._ombc is not None and
+            self._ombc.active
+        )
+
     # ---- relay control (logical state) ----
 
     async def _set_relay_on(self, on: bool) -> None:
@@ -160,6 +172,20 @@ class HeatPumpControlService(Service):
                             "Blocking ON: switched OFF only %d s ago, %d s remaining for on hysteresis",
                             int(diff), remaining,
                         )
+
+                        if self._can_send_ombc_timer_status:
+                            try:
+                                finished_at = datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining)
+                                await self.rm_item.send_msg_and_await_reception_status(
+                                    OMBCTimerStatus(
+                                        message_id=uuid.uuid4(),
+                                        timer_id=self._ombc._id_off_timer,
+                                        finished_at=finished_at
+                                    )
+                                )
+                            except Exception as e:
+                                logger.warning("Failed to send OMBCTimerUpdate: %s", e)
+
                         return
 
                 if (not on) and self._last_switched_on_ts is not None:
@@ -170,6 +196,20 @@ class HeatPumpControlService(Service):
                             "Blocking OFF: switched ON only %d s ago, %d s remaining for off hysteresis",
                             int(diff), remaining,
                         )
+
+                        if self._can_send_ombc_timer_status:
+                            try:
+                                finished_at = datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=remaining)
+                                await self.rm_item.send_msg_and_await_reception_status(
+                                    OMBCTimerStatus(
+                                        message_id=uuid.uuid4(),
+                                        timer_id=self._ombc._id_on_timer,
+                                        finished_at=finished_at
+                                    )
+                                )
+                            except Exception as e:
+                                logger.warning("Failed to send OMBCTimerUpdate: %s", e)
+
                         return
 
                 logger.debug(f"Switching relay to { 'ON' if on else 'OFF' }")
