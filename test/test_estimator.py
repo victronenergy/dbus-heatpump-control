@@ -14,7 +14,6 @@ class TestHeatpumpPowerEstimator(unittest.TestCase):
         est = HeatpumpPowerEstimator(
             nominal_total_w=2000,
             phases=1,
-            running_threshold_w=400,
             expected_floor_w=0,
         )
         est._expected_total = 1234.0
@@ -28,7 +27,6 @@ class TestHeatpumpPowerEstimator(unittest.TestCase):
         est = HeatpumpPowerEstimator(
             nominal_total_w=2000,
             phases=1,
-            running_threshold_w=400,
             expected_floor_w=0,
             significant_abs_w=1000,
             significant_rel=0.10,
@@ -41,7 +39,6 @@ class TestHeatpumpPowerEstimator(unittest.TestCase):
         est = HeatpumpPowerEstimator(
             nominal_total_w=600,
             phases=None,
-            running_threshold_w=600,
             expected_floor_w=0,
             alpha=1.0,
             target_mode="mean",
@@ -67,7 +64,6 @@ class TestHeatpumpPowerEstimator(unittest.TestCase):
         est = HeatpumpPowerEstimator(
             nominal_total_w=2000,
             phases=None,
-            running_threshold_w=600,
             expected_floor_w=0,
             alpha=1.0,
             target_mode="mean",

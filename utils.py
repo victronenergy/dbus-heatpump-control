@@ -81,13 +81,12 @@ class SettingsService(ObservableSettingsService):
 
     async def add_rm_settings(self,
                               ON_HYSTERESIS_S: int, OFF_HYSTERESIS_S: int,
-                              POWER_SETTING_W: int, RUNNING_THRESH_W: int,
+                              POWER_SETTING_W: int,
                               ESTIMATOR_SETTLING_TIME_S: int):
         await self.add_settings(
             Setting("/Settings/HeatpumpControl/OnHysteresis", ON_HYSTERESIS_S, _min=600),
 			Setting("/Settings/HeatpumpControl/OffHysteresis", OFF_HYSTERESIS_S, _min=600),
             Setting("/Settings/HeatpumpControl/PowerSetting", POWER_SETTING_W, _min=0),
-            Setting("/Settings/HeatpumpControl/RunningThreshold", RUNNING_THRESH_W, _min=0),
 			Setting("/Settings/HeatpumpControl/EstimatorSettlingTime", ESTIMATOR_SETTLING_TIME_S, _min=0),
 			Setting("/Settings/HeatpumpControl/EstimatedPowerOn", POWER_SETTING_W, _min=0),
             Setting("/Settings/HeatpumpControl/EstimatedPowerOff", 0, _min=0)
@@ -268,15 +267,6 @@ class HpItems:
         self.set_local("/S2/0/RmSettings/PowerSetting", val)
 
     @property
-    def running_threshold(self) -> int:
-        return self.get_setting("/Settings/HeatpumpControl/RunningThreshold")
-
-    @running_threshold.setter
-    def running_threshold(self, val: int):
-        self.set_setting("/Settings/HeatpumpControl/RunningThreshold", val)
-        self.set_local("/S2/0/RmSettings/RunningThreshold", val)
-
-    @property
     def estimator_settling_time(self) -> int:
         return self.get_setting("/Settings/HeatpumpControl/EstimatorSettlingTime")
 
@@ -332,12 +322,11 @@ class EstimatorManager:
         self.est = None
         self.hp_phases: int | None = None
 
-    def init(self, *, nominal_w: int, phases: int | None, running_thr: int):
+    def init(self, *, nominal_w: int, phases: int | None):
         self.hp_phases = phases if phases in (1, 3) else None
         self.est = self._make(
             nominal_total_w=nominal_w,
             phases=self.hp_phases,
-            running_threshold_w=running_thr,
             **self._kwargs,
         )
 
@@ -353,11 +342,6 @@ class EstimatorManager:
         if not self.est:
             return
         self.est.set_nominal_total_w(nominal_w, mode=mode, clear_history=clear_history)
-
-    def set_running_threshold(self, thr_w: int, *, clear_history: bool = True):
-        if not self.est:
-            return
-        self.est.set_running_threshold_w(thr_w, mode="explicit", clear_history=clear_history)
 
     def set_phases(self, phases: int, *, keep_expected: bool = True) -> bool:
         if phases not in (1, 3):
@@ -386,7 +370,6 @@ class HeatpumpPowerEstimator:
     Expected running power estimator.
 
       - Keep a rolling window of selected samples (time-based)
-      - Optional threshold filter can classify samples by running_threshold_w
       - target from rolling window (quantile or mean)
       - expected_P_total = EWMA toward target
       - per-phase estimate derived from expected total
@@ -397,7 +380,6 @@ class HeatpumpPowerEstimator:
         nominal_total_w: float,
         phases: int | None = None,
         *,
-        running_threshold_w: float | None = None,
         window_s: float = 600.0,
         quantile_q: float = 0.75,
         alpha: float = 0.05,
@@ -445,14 +427,6 @@ class HeatpumpPowerEstimator:
         self.settling_time_s = max(0.0, float(settling_time_s))
         self._state_changed_at: float | None = None
 
-        # Track whether threshold was auto-derived so we can keep it consistent on nominal changes
-        self._running_threshold_w_explicit = (running_threshold_w is not None)
-        self.running_threshold_w = float(
-            running_threshold_w
-            if running_threshold_w is not None
-            else max(0.25 * self.nominal_total_w, 600.0)
-        )
-
         new_expected = self.nominal_total_w
         if self.expected_cap_mult is None:
             self._expected_total = max(self.expected_floor_w, new_expected)
@@ -487,9 +461,6 @@ class HeatpumpPowerEstimator:
         old_nom = float(self.nominal_total_w)
         self.nominal_total_w = new_nom
 
-        if not self._running_threshold_w_explicit:
-            self.running_threshold_w = max(0.25 * self.nominal_total_w, 600.0)
-
         learned = (len(self._run_hist) >= 20)
 
         if mode == "auto":
@@ -514,37 +485,6 @@ class HeatpumpPowerEstimator:
         if clear_history:
             self._run_hist.clear()
             self._last_reported_expected_total = self._expected_total
-
-    def set_running_threshold_w(
-        self,
-        threshold_w: float | None,
-        *,
-        mode: str = "explicit",   # "explicit" | "auto"
-        clear_history: bool = False,
-    ) -> None:
-        """
-        Update the running threshold.
-
-        mode:
-        - "explicit": use threshold_w as fixed value
-        - "auto": derive from nominal (ignores threshold_w)
-
-        clear_history:
-        - If True, clears running sample window (recommended if threshold changes a lot)
-        """
-        if mode == "auto":
-            self._running_threshold_w_explicit = False
-            self.running_threshold_w = max(0.25 * self.nominal_total_w, 600.0)
-        elif mode == "explicit":
-            if threshold_w is None or threshold_w <= 0:
-                raise ValueError("threshold_w must be > 0 for explicit mode")
-            self._running_threshold_w_explicit = True
-            self.running_threshold_w = float(threshold_w)
-        else:
-            raise ValueError("mode must be 'explicit' or 'auto'")
-
-        if clear_history:
-            self._run_hist.clear()
 
     def feed(self, power: Power | None = None, *, L1=None, L2=None, L3=None) -> bool:
         """
@@ -637,7 +577,6 @@ class HeatpumpPowerEstimator:
         new = HeatpumpPowerEstimator(
             nominal_total_w=self.nominal_total_w,
             phases=phases,
-            running_threshold_w=(self.running_threshold_w if self._running_threshold_w_explicit else None),
             window_s=self.window_s,
             quantile_q=self.quantile_q,
             alpha=self.alpha,
@@ -651,11 +590,6 @@ class HeatpumpPowerEstimator:
             apply_running_threshold=self.apply_running_threshold,
             settling_time_s=self.settling_time_s,
         )
-
-        # preserve explicit/auto threshold behavior
-        new._running_threshold_w_explicit = self._running_threshold_w_explicit
-        if not new._running_threshold_w_explicit:
-            new.running_threshold_w = max(0.25 * new.nominal_total_w, 600.0)
 
         if keep_expected:
 

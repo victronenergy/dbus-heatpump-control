@@ -62,7 +62,6 @@ class HeatPumpControlService(Service):
     OFF_HYSTERESIS_S: int = 600
     ON_HYSTERESIS_S: int = 600
     POWER_SETTING_W: int = 2000
-    RUNNING_THRESH_W: int = 200
     ESTIMATOR_SETTLING_TIME_S: int = 300
 
     DEFAULT_RELAY_INDEX: int = 1  # default, 0-based
@@ -296,7 +295,6 @@ class HeatPumpControlService(Service):
             self.ON_HYSTERESIS_S,
             self.OFF_HYSTERESIS_S,
             self.POWER_SETTING_W,
-            self.RUNNING_THRESH_W,
             self.ESTIMATOR_SETTLING_TIME_S,
         )
 
@@ -336,9 +334,6 @@ class HeatPumpControlService(Service):
         self.add_item(IntegerItem("/S2/0/RmSettings/PowerSetting", self.items.power_setting,
                                   writeable=True, onchange=self._on_power_setting_change,
                                   text=lambda v: f"{v:.0f} W"))
-        self.add_item(IntegerItem("/S2/0/RmSettings/RunningThreshold", self.items.running_threshold,
-                                  writeable=True, onchange=self._on_running_thresh_change,
-                                  text=lambda v: f"{v:.0f} W"))
         self.add_item(IntegerItem("/S2/0/RmSettings/EstimatorSettlingTime", self.items.estimator_settling_time,
                       writeable=True, onchange=self._on_estimator_settling_time_change,
                       text=lambda v: f"{v:.0f} s"))
@@ -362,12 +357,10 @@ class HeatPumpControlService(Service):
         self.est_mgr_on.init(
             nominal_w=max(1, int(self.items.power_setting)),
             phases=phases,
-            running_thr=self.items.running_threshold,
         )
         self.est_mgr_off.init(
             nominal_w=max(1, 0),
             phases=phases,
-            running_thr=self.items.running_threshold,
         )
         self.est_mgr_on.set_settling_time(int(self.items.estimator_settling_time))
         self.est_mgr_off.set_settling_time(int(self.items.estimator_settling_time))
@@ -416,13 +409,6 @@ class HeatPumpControlService(Service):
         if self.s2:
             self.s2.request_system_description()
         logger.info("Power setting changed to %s W, estimator got reset", val)
-        return True
-
-    def _on_running_thresh_change(self, val: int):
-        self.items.running_threshold = val
-        self.est_mgr_on.set_running_threshold(int(val), clear_history=False)
-        self.est_mgr_off.set_running_threshold(int(val), clear_history=False)
-        logger.info("Running threshold changed to %s W", val)
         return True
 
     def _on_estimator_settling_time_change(self, val: int):
