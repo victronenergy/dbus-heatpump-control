@@ -63,6 +63,7 @@ class HeatPumpControlService(Service):
     ON_HYSTERESIS_S: int = 600
     POWER_SETTING_W: int = 2000
     RUNNING_THRESH_W: int = 200
+    ESTIMATOR_SETTLING_TIME_S: int = 300
 
     DEFAULT_RELAY_INDEX: int = 1  # default, 0-based
     REQUIRED_RELAY_FUNCTION: int = 6 # Opportunity Loads
@@ -221,6 +222,8 @@ class HeatPumpControlService(Service):
                     self._last_switched_on_ts = ts
                 else:
                     self._last_switched_off_ts = ts
+                self.est_mgr_on.mark_relay_state_change()
+                self.est_mgr_off.mark_relay_state_change()
         except Exception as e:
             logger.exception("Relay control failed: %s", e)
             await self._publish_allowed_control_types()
@@ -290,7 +293,12 @@ class HeatPumpControlService(Service):
 
         # Create settings with defaults, if missing
         await self._settings.add_rm_settings(
-            self.ON_HYSTERESIS_S, self.OFF_HYSTERESIS_S, self.POWER_SETTING_W, self.RUNNING_THRESH_W)
+            self.ON_HYSTERESIS_S,
+            self.OFF_HYSTERESIS_S,
+            self.POWER_SETTING_W,
+            self.RUNNING_THRESH_W,
+            self.ESTIMATOR_SETTLING_TIME_S,
+        )
 
         # S2 RM
         details = AssetDetails(
@@ -331,6 +339,9 @@ class HeatPumpControlService(Service):
         self.add_item(IntegerItem("/S2/0/RmSettings/RunningThreshold", self.items.running_threshold,
                                   writeable=True, onchange=self._on_running_thresh_change,
                                   text=lambda v: f"{v:.0f} W"))
+        self.add_item(IntegerItem("/S2/0/RmSettings/EstimatorSettlingTime", self.items.estimator_settling_time,
+                      writeable=True, onchange=self._on_estimator_settling_time_change,
+                      text=lambda v: f"{v:.0f} s"))
 
         self.add_item(IntegerItem("/Relay", self._relay_index,
                                   text=lambda v: f"Relay {v+1}"))
@@ -358,6 +369,8 @@ class HeatPumpControlService(Service):
             phases=phases,
             running_thr=self.items.running_threshold,
         )
+        self.est_mgr_on.set_settling_time(int(self.items.estimator_settling_time))
+        self.est_mgr_off.set_settling_time(int(self.items.estimator_settling_time))
 
         # init current + estimated
         self.items.current_power = self._heatpump.power.total
@@ -410,6 +423,13 @@ class HeatPumpControlService(Service):
         self.est_mgr_on.set_running_threshold(int(val), clear_history=False)
         self.est_mgr_off.set_running_threshold(int(val), clear_history=False)
         logger.info("Running threshold changed to %s W", val)
+        return True
+
+    def _on_estimator_settling_time_change(self, val: int):
+        self.items.estimator_settling_time = val
+        self.est_mgr_on.set_settling_time(int(val))
+        self.est_mgr_off.set_settling_time(int(val))
+        logger.info("Estimator settling time changed to %s s", val)
         return True
 
     # ---- itemsChanged routing ----
@@ -476,7 +496,13 @@ class HeatPumpControlService(Service):
         st_path = self.relay.state_path()
         fn_path = self.relay.function_path()
 
-        if st_path in values or fn_path in values:
+        if st_path in values:
+            prev_state = self.state_on
+            self._refresh_relay_state_from_services()
+            if prev_state != self.state_on:
+                self.est_mgr_on.mark_relay_state_change()
+                self.est_mgr_off.mark_relay_state_change()
+        elif fn_path in values:
             self._refresh_relay_state_from_services()
 
         # status updates only relevant for OMBC

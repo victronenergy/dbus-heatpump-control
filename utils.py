@@ -81,12 +81,14 @@ class SettingsService(ObservableSettingsService):
 
     async def add_rm_settings(self,
                               ON_HYSTERESIS_S: int, OFF_HYSTERESIS_S: int,
-                              POWER_SETTING_W: int, RUNNING_THRESH_W: int):
+                              POWER_SETTING_W: int, RUNNING_THRESH_W: int,
+                              ESTIMATOR_SETTLING_TIME_S: int):
         await self.add_settings(
             Setting("/Settings/HeatpumpControl/OnHysteresis", ON_HYSTERESIS_S, _min=600),
 			Setting("/Settings/HeatpumpControl/OffHysteresis", OFF_HYSTERESIS_S, _min=600),
             Setting("/Settings/HeatpumpControl/PowerSetting", POWER_SETTING_W, _min=0),
             Setting("/Settings/HeatpumpControl/RunningThreshold", RUNNING_THRESH_W, _min=0),
+			Setting("/Settings/HeatpumpControl/EstimatorSettlingTime", ESTIMATOR_SETTLING_TIME_S, _min=0),
 			Setting("/Settings/HeatpumpControl/EstimatedPowerOn", POWER_SETTING_W, _min=0),
             Setting("/Settings/HeatpumpControl/EstimatedPowerOff", 0, _min=0)
 		)
@@ -275,6 +277,15 @@ class HpItems:
         self.set_local("/S2/0/RmSettings/RunningThreshold", val)
 
     @property
+    def estimator_settling_time(self) -> int:
+        return self.get_setting("/Settings/HeatpumpControl/EstimatorSettlingTime")
+
+    @estimator_settling_time.setter
+    def estimator_settling_time(self, val: int):
+        self.set_setting("/Settings/HeatpumpControl/EstimatorSettlingTime", val)
+        self.set_local("/S2/0/RmSettings/EstimatorSettlingTime", val)
+
+    @property
     def current_power(self) -> int | None:
         it = self.svc.get_item("/Ac/Power")
         return int(it.value) if it and it.value is not None else None
@@ -359,6 +370,16 @@ class EstimatorManager:
         self.est = self.est.recreate(phases=phases, keep_expected=keep_expected)
         return True
 
+    def set_settling_time(self, settling_time_s: int):
+        if not self.est:
+            return
+        self.est.set_settling_time_s(settling_time_s)
+
+    def mark_relay_state_change(self):
+        if not self.est:
+            return
+        self.est.mark_relay_state_change()
+
 
 class HeatpumpPowerEstimator:
     """
@@ -390,6 +411,7 @@ class HeatpumpPowerEstimator:
         significant_rel: float = 0.10,
         learn_when_running: bool = True,
         apply_running_threshold: bool = False,
+        settling_time_s: float = 300.0,
     ):
         if nominal_total_w <= 0:
             raise ValueError("nominal_total_w must be > 0")
@@ -420,6 +442,8 @@ class HeatpumpPowerEstimator:
         self.significant_rel = float(significant_rel)
         self.learn_when_running = bool(learn_when_running)
         self.apply_running_threshold = bool(apply_running_threshold)
+        self.settling_time_s = max(0.0, float(settling_time_s))
+        self._state_changed_at: float | None = None
 
         # Track whether threshold was auto-derived so we can keep it consistent on nominal changes
         self._running_threshold_w_explicit = (running_threshold_w is not None)
@@ -550,6 +574,10 @@ class HeatpumpPowerEstimator:
 
         self._t += dt
 
+        if self._state_changed_at is not None:
+            if (self._t - self._state_changed_at) < self.settling_time_s:
+                return False
+
         # Infer phases if not set: count "available" phases (non-None and non-zero)
         if self.phases is None:
             inferred = self._infer_phases_from_power(power)
@@ -590,6 +618,13 @@ class HeatpumpPowerEstimator:
             self._last_reported_expected_total = self._expected_total
         return changed
 
+    def set_settling_time_s(self, settling_time_s: float) -> None:
+        self.settling_time_s = max(0.0, float(settling_time_s))
+
+    def mark_relay_state_change(self) -> None:
+        # Block estimator learning for settling_time_s after each relay transition.
+        self._state_changed_at = self._t
+
     def recreate(self, *, phases: int | None, keep_expected: bool = True) -> "HeatpumpPowerEstimator":
         """
         Return a fresh estimator with the same configuration but different phases.
@@ -614,6 +649,7 @@ class HeatpumpPowerEstimator:
             significant_rel=self.significant_rel,
             learn_when_running=self.learn_when_running,
             apply_running_threshold=self.apply_running_threshold,
+            settling_time_s=self.settling_time_s,
         )
 
         # preserve explicit/auto threshold behavior

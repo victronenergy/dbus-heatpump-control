@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 # aiovelib must be available before utils import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'ext', 'aiovelib'))
@@ -83,6 +84,52 @@ class TestHeatpumpPowerEstimator(unittest.TestCase):
         est.feed(power=Power(200, None, None))
 
         self.assertAlmostEqual(est.expected_P_total, 500.0)
+
+    @patch("utils.time.monotonic")
+    def test_settling_time_blocks_learning_after_relay_change(self, mock_monotonic):
+        est = HeatpumpPowerEstimator(
+            nominal_total_w=2000,
+            phases=1,
+            expected_floor_w=0,
+            alpha=1.0,
+            target_mode="mean",
+            min_samples=1,
+            settling_time_s=300,
+        )
+
+        # Baseline sample initializes timing.
+        mock_monotonic.side_effect = [0.0, 1.0, 301.0]
+        self.assertFalse(est.feed(power=Power(1000, None, None)))
+
+        est.mark_relay_state_change()
+        prev = est.expected_P_total
+
+        # During settling window: no learning.
+        self.assertFalse(est.feed(power=Power(1500, None, None)))
+        self.assertAlmostEqual(est.expected_P_total, prev)
+
+        # After settling window: learning resumes.
+        est.feed(power=Power(1500, None, None))
+        self.assertAlmostEqual(est.expected_P_total, 1500.0)
+
+    @patch("utils.time.monotonic")
+    def test_zero_settling_time_disables_blocking(self, mock_monotonic):
+        est = HeatpumpPowerEstimator(
+            nominal_total_w=2000,
+            phases=1,
+            expected_floor_w=0,
+            alpha=1.0,
+            target_mode="mean",
+            min_samples=1,
+            settling_time_s=0,
+        )
+
+        mock_monotonic.side_effect = [0.0, 1.0]
+        self.assertFalse(est.feed(power=Power(1000, None, None)))
+
+        est.mark_relay_state_change()
+        est.feed(power=Power(1600, None, None))
+        self.assertAlmostEqual(est.expected_P_total, 1600.0)
 
 
 if __name__ == "__main__":

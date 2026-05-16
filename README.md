@@ -36,6 +36,8 @@ The service uses the power measurements provided by the VM-3P75CT to learn the h
 
 It detects "running" states based on a threshold, stores recent running samples in a rolling time window, and derives a representative expected power using a configurable quantile combined with exponential smoothing (EWMA).
 
+After each relay state transition (ON->OFF or OFF->ON), estimator learning is paused for a configurable settling period. This avoids polluting the learned model with transient power values that are not yet temporally representative of the new relay state.
+
 This enables the system to model the heatpump as a stable and predictable load for S2's Operation Mode Based Control (OMBC), even though SG-Ready itself only offers binary ON/OFF signaling.
 
 ## Limitations
