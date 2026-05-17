@@ -491,6 +491,13 @@ class HeatPumpControlService(Service):
         elif fn_path in values:
             self._refresh_relay_state_from_services()
 
+            # Relay function changes are exposed via system service updates.
+            # Re-publish allowed control types so OMBC is removed/deactivated
+            # immediately when control is no longer allowed.
+            has_ombc = self._ombc in self.rm_item.control_types
+            if has_ombc != self._is_ombc_allowed():
+                asyncio.create_task(self._publish_allowed_control_types())
+
         # status updates only relevant for OMBC
         if self.s2.ombc_active:
             self.s2.notify_state_changed(self.state_on)
